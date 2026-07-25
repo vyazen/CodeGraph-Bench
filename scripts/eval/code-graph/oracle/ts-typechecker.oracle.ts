@@ -430,10 +430,41 @@ export class TsTypeCheckerOracle {
   };
 
     ts.forEachChild(sourceFile, visit);
+
+    // Module-scope calls (top-level code) → attributed to the File.
+    this.visitModuleScopeCalls(sourceFile, checker, relPath, pushEdge);
+
     return { edges, resolvedCount, symbols };
   }
 
-  /** Walk a function/method body and extract CallExpression sites. */
+  /**
+   * True if an arrow/function-expression is bound to a name (a variable, a class
+   * field, or an object/assignment property). Name-bound functions are their own
+   * container and are captured separately — so call extraction must STOP at them.
+   * Anonymous inline callbacks (passed as arguments, IIFEs, array elements, …)
+   * are NOT name-bound: their calls belong to the nearest named enclosing
+   * function/method, which is exactly how both Vyazen and GitNexus attribute them.
+   */
+  private isNameBound(fn: ts.Node): boolean {
+    const p = fn.parent;
+    if (!p) return false;
+    return (
+      ts.isVariableDeclaration(p) ||
+      ts.isPropertyDeclaration(p) ||
+      ts.isPropertyAssignment(p) ||
+      ts.isBinaryExpression(p) // x.y = () => {…}
+    );
+  }
+
+  /**
+   * Walk a container body and extract CallExpression sites.
+   *
+   * Recurses THROUGH anonymous callbacks (arrow/function expressions passed
+   * inline) so their calls are attributed to `containerLocalId` — matching how
+   * both tools attribute callback calls. Stops at nested named functions, class
+   * fields/accessors, and class/interface declarations, which are captured as
+   * their own containers (or deliberately skipped, for accessors/fields).
+   */
   private visitCallSites(
     node: ts.Node,
     checker: ts.TypeChecker,
@@ -441,12 +472,15 @@ export class TsTypeCheckerOracle {
     pushEdge: (from: string, name: string, type: EdgeType, sym: ts.Symbol | null) => void,
   ): void {
     const visit = (n: ts.Node) => {
-      // Don't descend into nested function/class declarations (they rebind container)
-      if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) {
-        if (n !== node) return;
-      }
-      if (ts.isClassDeclaration(n) || ts.isInterfaceDeclaration(n)) {
-        if (n !== node) return;
+      if (n !== node) {
+        // Nested named function declarations rebind the container.
+        if (ts.isFunctionDeclaration(n)) return;
+        // Name-bound arrows/func-expressions are separate containers (or skipped
+        // fields/accessors). Anonymous inline callbacks fall through and recurse.
+        if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && this.isNameBound(n)) return;
+        // Accessors and property/field initializers: tools disagree — skip.
+        if (ts.isGetAccessor(n) || ts.isSetAccessor(n) || ts.isPropertyDeclaration(n)) return;
+        if (ts.isClassDeclaration(n) || ts.isInterfaceDeclaration(n)) return;
       }
 
       if (ts.isCallExpression(n) || ts.isNewExpression(n)) {
@@ -459,6 +493,39 @@ export class TsTypeCheckerOracle {
       ts.forEachChild(n, visit);
     };
     visit(node);
+  }
+
+  /**
+   * Extract module-scope call sites (top-level code outside any function/method)
+   * and attribute them to the File. Both Vyazen and GitNexus attribute
+   * module-scope calls to the File node, so this is a fair, agreed convention.
+   *
+   * Container declarations (functions, classes, interfaces, enums, imports,
+   * type aliases, namespaces) are captured elsewhere and skipped here.
+   * visitCallSites stops at name-bound functions, so function-valued top-level
+   * variables are not double-counted.
+   */
+  private visitModuleScopeCalls(
+    sourceFile: ts.SourceFile,
+    checker: ts.TypeChecker,
+    relPath: string,
+    pushEdge: (from: string, name: string, type: EdgeType, sym: ts.Symbol | null) => void,
+  ): void {
+    for (const st of sourceFile.statements) {
+      if (
+        ts.isFunctionDeclaration(st) ||
+        ts.isClassDeclaration(st) ||
+        ts.isInterfaceDeclaration(st) ||
+        ts.isEnumDeclaration(st) ||
+        ts.isModuleDeclaration(st) ||
+        ts.isImportDeclaration(st) ||
+        ts.isExportDeclaration(st) ||
+        ts.isTypeAliasDeclaration(st)
+      ) {
+        continue;
+      }
+      this.visitCallSites(st, checker, relPath, pushEdge);
+    }
   }
 
   /** Walk a function/method body and extract PropertyAccessExpression sites (ACCESSES). */

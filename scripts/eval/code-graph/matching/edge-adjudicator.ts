@@ -118,9 +118,11 @@ export function adjudicateEdges(
       continue;
     }
 
-    // Resolve oracle from-key
+    // Resolve oracle from-key. IMPORTS and module-scope calls (from a File node)
+    // are keyed by file path — the oracle attributes both to the file's relPath.
+    // Everything else is keyed by the from-node's matched oracle symbol.
     let oracleFromKey: string;
-    if (edge.type === 'IMPORTS') {
+    if (edge.type === 'IMPORTS' || fromTool.kind === 'File') {
       oracleFromKey = fromTool.path;
     } else {
       const oracleSym = toolToOracle.get(edge.fromId);
