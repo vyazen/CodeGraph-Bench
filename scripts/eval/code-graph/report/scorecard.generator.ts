@@ -155,7 +155,7 @@ export function generateScorecard(input: ScorecardInput): string {
     }
     lines.push(`| **Overall** | ${num(d2.edges.overall.tp)} | ${num(d2.edges.overall.fp)} | ${num(d2.edges.overall.fn)} | ${pct(d2.edges.overall.precision)} | ${pct(d2.edges.overall.recall)} | ${pct(d2.edges.overall.f1)} | — | — | **${pct(d2.edges.targetAccuracy)}** |`);
     lines.push('');
-    lines.push(`**Self-loop leak:** ${num(d2.edges.selfLoopLeak)} · **Dangling endpoint rate:** ${pct(d2.edges.danglingEndpointRate)}`);
+    lines.push(`**Self-loop leak:** ${num(d2.edges.selfLoopLeak)} · **Unresolved abstentions (excluded from precision):** ${num(d2.edges.abstained)} · **Dangling endpoint rate:** ${pct(d2.edges.danglingEndpointRate)}`);
     lines.push('');
   }
 

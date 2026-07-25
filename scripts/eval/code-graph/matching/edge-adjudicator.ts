@@ -27,6 +27,14 @@ export interface EdgeAdjudication {
   truePositives: GraphEdge[];
   targetConfirmed: GraphEdge[];
   nameOnlyConfirmed: GraphEdge[];
+  /**
+   * Abstentions: edges where the tool detected a relationship but did not
+   * resolve a distinct target (`fromId === toId` with `resolved === false`).
+   * Vyazen exports unresolved calls as self-edges — these are not target
+   * claims, so scoring them as false positives punishes the tool for declining
+   * to guess. Excluded from precision; reported separately (no silent drop).
+   */
+  abstained: GraphEdge[];
 }
 
 const LINE_TOLERANCE = 2;
@@ -93,8 +101,16 @@ export function adjudicateEdges(
   const falsePositives: GraphEdge[] = [];
   const targetConfirmed: GraphEdge[] = [];
   const nameOnlyConfirmed: GraphEdge[] = [];
+  const abstained: GraphEdge[] = [];
 
   for (const edge of toolEdges) {
+    // Abstention: a self-edge with no resolved target is "relationship detected,
+    // target not asserted" — not a false claim. Set aside, don't count as FP.
+    if (edge.fromId === edge.toId && edge.resolved === false) {
+      abstained.push(edge);
+      continue;
+    }
+
     const fromTool = toolNodeById.get(edge.fromId);
     const toTool = toolNodeById.get(edge.toId);
     if (!fromTool || !toTool) {
@@ -122,19 +138,40 @@ export function adjudicateEdges(
       continue;
     }
 
-    // Tier 1: Try target-based matching (tool's to-node vs oracle's resolved target)
+    // Tier 1: Try target-based matching (tool's to-node vs oracle's resolved target).
+    //
+    // Preferred: bridge through node identity. The tool's to-node was matched to
+    // an oracle symbol (toOracle); if that symbol IS the oracle edge's resolved
+    // target (same path + localId), the edge points at the right code. This is
+    // robust to per-tool line conventions (doc-comment/decorator offsets) because
+    // the node matcher already absorbed them.
+    //
+    // Fallback: raw (path, line±2) comparison, for to-nodes the matcher couldn't
+    // bind to an oracle symbol (e.g. external targets, unmatched nodes).
+    const toOracle = toolToOracle.get(edge.toId);
     let matched = false;
-    if (toTool.path && toTool.startLine !== null) {
-      for (const cand of candidates) {
-        if (matchedOracleEdges.has(cand)) continue;
-        if (!cand.targetPath) continue; // oracle didn't resolve this one
-        if (normPath(cand.targetPath) === normPath(toTool.path) && linesMatch(cand.targetStartLine, toTool.startLine)) {
-          matchedOracleEdges.add(cand);
-          truePositives.push(edge);
-          targetConfirmed.push(edge);
-          matched = true;
-          break;
-        }
+    for (const cand of candidates) {
+      if (matchedOracleEdges.has(cand)) continue;
+      if (!cand.targetPath) continue; // oracle didn't resolve this one
+
+      let hit = false;
+      if (toOracle && cand.targetLocalId) {
+        hit =
+          normPath(cand.targetPath) === normPath(toOracle.path) &&
+          cand.targetLocalId === toOracle.localId;
+      }
+      if (!hit && toTool.path && toTool.startLine !== null && toTool.startLine !== undefined) {
+        hit =
+          normPath(cand.targetPath) === normPath(toTool.path) &&
+          linesMatch(cand.targetStartLine, toTool.startLine);
+      }
+
+      if (hit) {
+        matchedOracleEdges.add(cand);
+        truePositives.push(edge);
+        targetConfirmed.push(edge);
+        matched = true;
+        break;
       }
     }
 
@@ -167,5 +204,5 @@ export function adjudicateEdges(
     }
   }
 
-  return { truePositives, falsePositives, falseNegatives, targetConfirmed, nameOnlyConfirmed };
+  return { truePositives, falsePositives, falseNegatives, targetConfirmed, nameOnlyConfirmed, abstained };
 }

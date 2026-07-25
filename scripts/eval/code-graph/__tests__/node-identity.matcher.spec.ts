@@ -54,13 +54,29 @@ describe('matchNodes', () => {
     expect(res.matched).toHaveLength(1);
   });
 
-  it('does NOT match when line delta > 2', () => {
+  it('matches a unique (path,name) even when line delta > 2 (doc-comment/decorator convention)', () => {
+    // A tool that records a symbol's start at its leading JSDoc block is off by
+    // several lines from the TS compiler's `class`/`function` line. With a single
+    // candidate, that must NOT be scored as both an FP and an FN — it's the same
+    // symbol, correctly extracted, at a different line convention.
     const oracle = [mkOracle({ name: 'foo', path: 'src/a.ts', startLine: 10 })];
     const tool = [mkTool({ name: 'foo', path: 'src/a.ts', startLine: 15 })];
     const res = matchNodes(tool, oracle);
-    expect(res.matched).toHaveLength(0);
-    expect(res.toolUnmatched).toHaveLength(1);
-    expect(res.oracleUnmatched).toHaveLength(1);
+    expect(res.matched).toHaveLength(1);
+    expect(res.toolUnmatched).toHaveLength(0);
+    expect(res.oracleUnmatched).toHaveLength(0);
+  });
+
+  it('still disambiguates overloads by nearest line even when both are far off', () => {
+    // Line is a tie-breaker among same-(path,name) candidates: pick nearest.
+    const oracle = [
+      mkOracle({ name: 'bar', path: 'src/a.ts', startLine: 10, localId: 'a.ts:bar#1' }),
+      mkOracle({ name: 'bar', path: 'src/a.ts', startLine: 40, localId: 'a.ts:bar#2' }),
+    ];
+    const tool = [mkTool({ name: 'bar', path: 'src/a.ts', startLine: 34 })];
+    const res = matchNodes(tool, oracle);
+    expect(res.matched).toHaveLength(1);
+    expect(res.matched[0].oracle.localId).toBe('a.ts:bar#2');
   });
 
   it('resolves overloads by nearest startLine', () => {

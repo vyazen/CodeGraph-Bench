@@ -64,6 +64,8 @@ export interface D2Report {
     importsModuleLevel: ImportModuleLevelMetrics;
     overall: KindMetrics;
     selfLoopLeak: number;
+    /** Unresolved self-edges set aside as abstentions (excluded from precision). */
+    abstained: number;
     /** Overall target accuracy across all comparable edge types. */
     targetAccuracy: number;
   };
@@ -249,6 +251,7 @@ export function scoreD2(
 
   return {
     edges: {
+      abstained: adjudication.abstained.length,
       byType: Object.fromEntries(byType) as Partial<Record<EdgeType, EdgeTypeMetrics>>,
       danglingEndpointRate,
       extendedByType: Object.fromEntries(extendedByType) as Partial<Record<EdgeType, KindMetrics>>,

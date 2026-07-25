@@ -404,7 +404,12 @@ export class TsTypeCheckerOracle {
             } else {
               for (const el of clause.namedBindings.elements) {
                 const elName = el.name.text;
-                const symbol = checker.getSymbolAtLocation(el);
+                // Resolve the imported NAME, not the ImportSpecifier node —
+                // getSymbolAtLocation(el) yields nothing, so named imports were
+                // never target-resolved (only 1.4% of all imports resolved).
+                // getSymbolAtLocation(el.name) returns the local alias symbol,
+                // which resolveSymbolLocation then follows to the real declaration.
+                const symbol = checker.getSymbolAtLocation(el.name);
                 pushEdge(relPath, elName, 'IMPORTS', symbol);
               }
             }

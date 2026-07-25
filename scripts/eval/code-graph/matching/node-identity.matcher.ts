@@ -6,12 +6,18 @@
  * the engineering time actually goes."
  *
  * Known failure modes handled:
- * - Overloads sharing a name+line → pick nearest startLine
+ * - Overloads sharing a name → pick nearest startLine (+ same kind)
  * - Anonymous/arrow functions → skip (name is empty or '[anonymous]')
  * - Re-exports → a re-export has the same name but different path; matches
  *   only if the path also matches
- * - ±2-line tolerance for tools that record slightly different start lines
- *   (e.g. decorators, JSDoc) than the TS compiler
+ * - Line-number conventions differ per tool. Some tools record a symbol's start
+ *   at its leading JSDoc/decorator block; the TS compiler records it at the
+ *   `class`/`function` keyword. Those offsets are routinely 3–10 lines. So the
+ *   start line is used only to DISAMBIGUATE between same-(path,name) candidates
+ *   (nearest wins), NOT as a hard gate. A unique (path,name) match is accepted
+ *   regardless of line delta — otherwise a correctly-extracted symbol whose doc
+ *   comment shifts its line is scored as both a false positive and a false
+ *   negative (double penalty for a correct result).
  */
 
 import type { GraphNode, OracleSymbol } from '../types';
@@ -29,8 +35,6 @@ export interface MatchResult {
   /** Fraction of oracle nodes matched (0-1). */
   oracleMatchRate: number;
 }
-
-const LINE_TOLERANCE = 2;
 
 /** Normalize a path for matching: forward slashes, no leading ./, lowercase drive. */
 export function normalizePath(p: string): string {
@@ -74,14 +78,42 @@ function buildOracleIndex(oracle: OracleSymbol[]): Map<string, OracleSymbol[]> {
 }
 
 /**
+ * Choose the best oracle symbol for a tool node among same-(path,name) candidates.
+ *
+ * Line is a tie-breaker, not a gate: prefer candidates of the same kind, then the
+ * one nearest by startLine. If the tool node has no startLine, take the first
+ * available candidate. A single candidate is always accepted regardless of the
+ * line delta (see the module header — doc-comment/decorator line conventions).
+ */
+function pickBest(tool: GraphNode, candidates: OracleSymbol[]): OracleSymbol {
+  const sameKind = candidates.filter((c) => c.kind === tool.kind);
+  const pool = sameKind.length > 0 ? sameKind : candidates;
+
+  if (tool.startLine === null || tool.startLine === undefined) {
+    return pool[0];
+  }
+
+  let best = pool[0];
+  let bestDelta = Math.abs(best.startLine - tool.startLine);
+  for (const cand of pool) {
+    const delta = Math.abs(cand.startLine - tool.startLine);
+    if (delta < bestDelta) {
+      best = cand;
+      bestDelta = delta;
+    }
+  }
+  return best;
+}
+
+/**
  * Match tool nodes to oracle symbols.
  *
  * Strategy:
  * 1. Index oracle by (path, name)
- * 2. For each tool node, find candidates with the same (path, name)
- * 3. Among candidates, pick the one whose startLine is within ±2 of the tool's
- *    startLine and nearest. If the tool has no startLine, pick any unmatched candidate.
- * 4. Each oracle symbol can be matched at most once (prevents double-counting).
+ * 2. For each tool node, find unmatched candidates with the same (path, name)
+ * 3. Among them, pick the best by kind + nearest startLine (line is a
+ *    tie-breaker, NOT a gate — see the module header)
+ * 4. Each oracle symbol can be matched at most once (prevents double-counting)
  */
 export function matchNodes(toolNodes: GraphNode[], oracle: OracleSymbol[]): MatchResult {
   const oracleIdx = buildOracleIndex(oracle);
@@ -89,28 +121,10 @@ export function matchNodes(toolNodes: GraphNode[], oracle: OracleSymbol[]): Matc
   const matchedOracleKeys = new Set<string>(); // key: path\0localId
   const toolUnmatched: GraphNode[] = [];
 
+  const claimKey = (s: OracleSymbol) => `${normalizePath(s.path)}\0${s.localId}`;
+
   for (const tool of toolNodes) {
     if (!isMatchableName(tool.name)) continue;
-    if (tool.startLine === null) {
-      // No line info — try to match by name only if there's exactly one candidate
-      const key = `${normalizePath(tool.path)}\0${tool.name}`;
-      const candidates = oracleIdx.get(key);
-      if (!candidates || candidates.length === 0) {
-        toolUnmatched.push(tool);
-        continue;
-      }
-      const unmatchedCands = candidates.filter(
-        (c) => !matchedOracleKeys.has(`${normalizePath(c.path)}\0${c.localId}`),
-      );
-      if (unmatchedCands.length === 0) {
-        toolUnmatched.push(tool);
-        continue;
-      }
-      const chosen = unmatchedCands[0];
-      matchedOracleKeys.add(`${normalizePath(chosen.path)}\0${chosen.localId}`);
-      matched.push({ oracle: chosen, tool });
-      continue;
-    }
 
     const key = `${normalizePath(tool.path)}\0${tool.name}`;
     const candidates = oracleIdx.get(key);
@@ -119,25 +133,15 @@ export function matchNodes(toolNodes: GraphNode[], oracle: OracleSymbol[]): Matc
       continue;
     }
 
-    // Among unmatched candidates, pick the one with startLine within ±2 and nearest
-    let best: OracleSymbol | null = null;
-    let bestDelta = Number.POSITIVE_INFINITY;
-    for (const cand of candidates) {
-      const candKey = `${normalizePath(cand.path)}\0${cand.localId}`;
-      if (matchedOracleKeys.has(candKey)) continue;
-      const delta = Math.abs(cand.startLine - tool.startLine);
-      if (delta <= LINE_TOLERANCE && delta < bestDelta) {
-        best = cand;
-        bestDelta = delta;
-      }
+    const available = candidates.filter((c) => !matchedOracleKeys.has(claimKey(c)));
+    if (available.length === 0) {
+      toolUnmatched.push(tool);
+      continue;
     }
 
-    if (best) {
-      matchedOracleKeys.add(`${normalizePath(best.path)}\0${best.localId}`);
-      matched.push({ oracle: best, tool });
-    } else {
-      toolUnmatched.push(tool);
-    }
+    const chosen = pickBest(tool, available);
+    matchedOracleKeys.add(claimKey(chosen));
+    matched.push({ oracle: chosen, tool });
   }
 
   const oracleUnmatched = oracle.filter(
