@@ -244,3 +244,46 @@ export function normalizeVyazenEdgeType(raw: string): EdgeType {
   };
   return map[raw] ?? 'UNKNOWN';
 }
+
+/**
+ * Graphify `link.relation` → EdgeType. Observed via `graphify update` on
+ * BabylonJS (v0.9.27): imports/imports_from/calls/indirect_call/inherits/
+ * implements/contains/method/defines/extends/re_exports/references/
+ * rationale_for/cites.
+ *
+ * Two deliberate divergences from the obvious name-based mapping:
+ * - `inherits` (not `extends`!) is Graphify's class/interface heritage
+ *   relation — confirmed by sampling: `extends` only ever appears on
+ *   package.json-style config nodes (e.g. eslint `extends`), never on a
+ *   `.ts`/`.tsx` class or interface. Mapping `extends` → EXT***REMOVED***S would
+ *   silently pollute the class-inheritance edge count with config noise.
+ * - `references` (23,410 edges — generic identifier/property references) has
+ *   no equivalent in our ontology (it isn't CALLS/IMPORTS/EXT***REMOVED***S/IMPLEMENTS,
+ *   and mapping it to USES_TYPE would misrepresent it as type-usage
+ *   tracking). Left UNKNOWN/excluded, unlike GitNexus's ACCESSES.
+ *
+ * `re_exports`, `rationale_for`, `cites` are also excluded: re-export
+ * semantics weren't verified against the oracle's IMPORTS convention closely
+ * enough to score with confidence, and rationale_for/cites are
+ * documentation-citation edges, not code edges.
+ */
+export function normalizeGraphifyEdgeType(relation: string): EdgeType {
+  const map: Record<string, EdgeType> = {
+    calls: 'CALLS',
+    indirect_call: 'CALLS',
+    imports: 'IMPORTS',
+    imports_from: 'IMPORTS',
+    inherits: 'EXT***REMOVED***S',
+    implements: 'IMPLEMENTS',
+    contains: 'CONTAINS',
+    method: 'CONTAINS',
+    defines: 'CONTAINS',
+    // Config-level (package.json), not code inheritance — see doc comment above.
+    extends: 'UNKNOWN',
+    re_exports: 'UNKNOWN',
+    references: 'UNKNOWN',
+    rationale_for: 'UNKNOWN',
+    cites: 'UNKNOWN',
+  };
+  return map[relation] ?? 'UNKNOWN';
+}

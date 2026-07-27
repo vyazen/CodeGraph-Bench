@@ -160,6 +160,16 @@ export function scoreD2(
   const matchResult = matchNodes(comparableToolNodes, oracleSymbols);
   const nodeMatches: NodeMatch[] = matchResult.matched;
 
+  // Edge adjudication needs matches for ALL tool nodes, not just the
+  // kind-filtered comparable set above. A tool whose adapter can't classify a
+  // symbol's kind (e.g. Graphify has no Class/Interface tag for TS/JS — see
+  // graphify.adapter.ts) would otherwise have every edge FROM that node
+  // (EXT***REMOVED***S, IMPLEMENTS, ...) forced to FP/FN, since the adjudicator can't
+  // resolve the from-node's oracle identity. D1 (d1-depth.scorer.ts) already
+  // matches on the full node set for this reason; D2 must too, or the same
+  // edges score correctly in one section and as 0% in the other.
+  const edgeNodeMatches: NodeMatch[] = matchNodes(toolNodes, oracleSymbols).matched;
+
   const comparableSymbolTypes = new Set<SymbolType>([
     'Class', 'Interface', 'Enum', 'Alias', 'Function', 'Method', 'Constructor',
     'Property', 'GlobalVariable', 'Module', 'Namespace',
@@ -192,7 +202,7 @@ export function scoreD2(
     toolEdges.filter((e) => COMPARABLE_EDGE_TYPES.has(e.type)),
     toolNodes,
     oracleEdges.filter((e) => COMPARABLE_EDGE_TYPES.has(e.type)),
-    nodeMatches,
+    edgeNodeMatches,
     oracleSymbols,
   );
 
@@ -234,7 +244,7 @@ export function scoreD2(
     const oracleEdgesOfType = oracleEdges.filter((e) => e.type === t);
     if (toolEdgesOfType.length === 0 && oracleEdgesOfType.length === 0) continue;
 
-    const adj = adjudicateEdges(toolEdgesOfType, toolNodes, oracleEdgesOfType, nodeMatches, oracleSymbols);
+    const adj = adjudicateEdges(toolEdgesOfType, toolNodes, oracleEdgesOfType, edgeNodeMatches, oracleSymbols);
     extendedByType.set(t, computeMetrics(adj.truePositives.length, adj.falsePositives.length, adj.falseNegatives.length));
   }
 

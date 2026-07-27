@@ -13,6 +13,16 @@ import type { D2Report } from '../scorers/d2-fidelity.scorer';
 import type { D4Report } from '../scorers/d4-capability.scorer';
 import type { ToolGraph } from '../types';
 
+export interface D3PipelineCost {
+  /** e.g. "71.8s (`/usr/bin/time -l gitnexus analyze --embeddings --force`)". */
+  wallClock: string;
+  /** e.g. "4.0 GiB". */
+  peakRss: string;
+  /** On-disk index size, e.g. "1.04 GB (.gitnexus/)". */
+  indexSize: string;
+  notes?: string;
+}
+
 export interface ScorecardInput {
   d1: Record<string, D1Report>;
   d2: Record<string, D2Report>;
@@ -24,10 +34,19 @@ export interface ScorecardInput {
   commitSha: string;
   /** Fraction of oracle edges with type-checker-resolved targets. */
   oracleResolvedRate?: number;
+  /** D3 — pipeline cost (wall-clock/RSS/disk), measured manually per CODE_GRAPH_EVAL_PLAN.md §D3. */
+  d3?: Record<string, D3PipelineCost>;
 }
 
 const pct = (n: number): string => n == null ? '—' : `${(n * 100).toFixed(1)}%`;
 const num = (n: number): string => n == null ? '—' : n.toLocaleString();
+
+/** Grammatical list join: "A", "A and B", "A, B and C" — not "A and B and C". */
+function listJoin(items: string[]): string {
+  if (items.length <= 1) return items.join('');
+  if (items.length === 2) return items.join(' and ');
+  return `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+}
 
 export function generateScorecard(input: ScorecardInput): string {
   const toolNames = Object.keys(input.d2);
@@ -51,7 +70,7 @@ export function generateScorecard(input: ScorecardInput): string {
   if (input.oracleResolvedRate !== undefined) {
     lines.push(`- **Oracle resolution:** ${pct(input.oracleResolvedRate)} of oracle edges have type-checker-resolved targets (the rest are dynamic/external calls the compiler couldn't resolve).`);
   }
-  lines.push(`- **Tools:** ${toolNames.map((t) => `**${t}**`).join(' and ')}.`);
+  lines.push(`- **Tools:** ${listJoin(toolNames.map((t) => `**${t}**`))}.`);
   lines.push('');
   lines.push('### Key terms');
   lines.push('');
@@ -162,7 +181,7 @@ export function generateScorecard(input: ScorecardInput): string {
   // ── Module-level IMPORTS ───────────────────────────────────────────────────
   lines.push('### IMPORTS — module-level (File → File)');
   lines.push('');
-  lines.push('**What this measures:** IMPORTS scored at module-dependency granularity — "does file X depend on file Y?" Both tools can compete at this level, regardless of whether they model imports as File→Symbol (Vyazen) or File→File (GitNexus).');
+  lines.push('**What this measures:** IMPORTS scored at module-dependency granularity — "does file X depend on file Y?" Every tool can compete at this level, regardless of whether it models imports at File→Symbol granularity (an advantage on the symbol-level table above) or only File→File.');
   lines.push('');
   lines.push('| Tool | Tool pairs | Oracle pairs | TP | FP | FN | Precision | Recall |');
   lines.push('|------|------------|--------------|----|----|----|-----------|--------|');
@@ -253,6 +272,27 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('---');
   lines.push('');
 
+  // ── D3 — Pipeline cost ──────────────────────────────────────────────────────
+  if (input.d3) {
+    lines.push('## D3 — Pipeline cost');
+    lines.push('');
+    lines.push('**What this measures:** what it costs to stand up each tool\'s index — wall-clock, peak memory, on-disk size. Measured directly (`/usr/bin/time -l`), not estimated. Per methodology: a crash or timeout here is a finding, not a blank cell.');
+    lines.push('');
+    lines.push('| Tool | Wall-clock | Peak RSS | Index size | Notes |');
+    lines.push('|------|-----------|----------|------------|-------|');
+    for (const name of toolNames) {
+      const d3 = input.d3[name];
+      if (!d3) {
+        lines.push(`| ${name} | — | — | — | Not measured |`);
+        continue;
+      }
+      lines.push(`| ${name} | ${d3.wallClock} | ${d3.peakRss} | ${d3.indexSize} | ${d3.notes ?? ''} |`);
+    }
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+  }
+
   // ── D4 — Capability envelope ───────────────────────────────────────────────
   lines.push('## D4 — Capability envelope');
   lines.push('');
@@ -300,7 +340,7 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('');
   lines.push('| Term | Definition |');
   lines.push('|------|------------|');
-  lines.push('| **ACCESSES** | Edge from a code location to a property it accesses (e.g. `this.foo` → `foo` property). GitNexus-only. |');
+  lines.push('| **ACCESSES** | Edge from a code location to a property it accesses (e.g. `this.foo` → `foo` property). Emitted by GitNexus only, among the tools in this scorecard. |');
   lines.push('| **AST** | Abstract Syntax Tree — parsed structure of source code. |');
   lines.push('| **CALLS** | Edge from a caller to a callee. "A calls B". |');
   lines.push('| **Compiler resolution** | Using the TS type checker to determine the exact target of a call/import/inheritance. |');
@@ -308,15 +348,15 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('| **F1** | Harmonic mean of precision and recall. Punishes imbalanced scores. |');
   lines.push('| **IMPLEMENTS** | Edge from a class to an interface it implements. |');
   lines.push('| **IMPORTS (module-level)** | File→File dependency. "file X imports from file Y". Both tools. |');
-  lines.push('| **IMPORTS (symbol-level)** | File→Symbol dependency. "file X imports symbol `foo`". Vyazen advantage. |');
-  lines.push('| **METHOD_OVERRIDES** | Edge from a method to the parent method it overrides. GitNexus-only. |');
+  lines.push('| **IMPORTS (symbol-level)** | File→Symbol dependency. "file X imports symbol `foo`". Advantage for tools that model imports at symbol granularity. |');
+  lines.push('| **METHOD_OVERRIDES** | Edge from a method to the parent method it overrides. Emitted by GitNexus only, among the tools in this scorecard. |');
   lines.push('| **Oracle** | Ground truth from the TS type checker. Neutral — it\'s the language\'s semantics. |');
   lines.push('| **Precision** | `TP / (TP + FP)`. "Of what I claim, how much is correct?" |');
   lines.push('| **Recall** | `TP / (TP + FN)`. "Of what exists, how much did I find?" |');
   lines.push('| **Target accuracy** | Of correct edges (TPs), fraction that point to the exact target the type checker resolves to (by file + line ±2). |');
   lines.push('| **Target confirmed** | TPs where the tool\'s to-node matches the oracle\'s resolved target by file + line. |');
   lines.push('| **TP / FP / FN** | True Positive / False Positive / False Negative. |');
-  lines.push('| **USES_TYPE** | Edge from a typed element to the type it references (e.g. `x: Foo` → `Foo`). Vyazen-only. |');
+  lines.push('| **USES_TYPE** | Edge from a typed element to the type it references (e.g. `x: Foo` → `Foo`). Emitted by Vyazen only, among the tools in this scorecard. |');
   lines.push('');
 
   // ── Deliverables ───────────────────────────────────────────────────────────

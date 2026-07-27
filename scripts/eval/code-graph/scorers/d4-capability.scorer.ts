@@ -73,47 +73,51 @@ export function scoreD4(
   const capabilityMatrix: CapabilityEntry[] = [
     {
       capability: 'Compiler/type-aware edge resolution (resolved=true)',
-      tools: { GitNexus: 'no', Vyazen: 'yes' },
+      tools: { GitNexus: 'no', Graphify: 'no', Vyazen: 'yes' },
     },
     {
       capability: 'resolutionKind slice (compiler-symbol vs receiver-type)',
-      tools: { GitNexus: 'no', Vyazen: 'yes' },
+      tools: { GitNexus: 'no', Graphify: 'no', Vyazen: 'yes' },
     },
     {
       capability: 'USES_TYPE edges (type usage tracking)',
-      tools: { GitNexus: 'no', Vyazen: 'yes' },
+      tools: { GitNexus: 'no', Graphify: 'no', Vyazen: 'yes' },
     },
     {
       capability: 'Leiden community clustering',
-      tools: { GitNexus: 'yes', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'yes', Vyazen: 'no' },
     },
     {
       capability: 'Process tracing (execution flow nodes)',
-      tools: { GitNexus: 'yes', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'no' },
     },
     {
       capability: 'BM25 + semantic hybrid search',
-      tools: { GitNexus: 'yes', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'no' },
     },
     {
       capability: 'Code embeddings (vector search)',
-      tools: { GitNexus: 'yes', Vyazen: 'yes' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'yes' },
     },
     {
       capability: 'Incremental re-indexing',
-      tools: { GitNexus: 'yes', Vyazen: 'yes' },
+      tools: { GitNexus: 'yes', Graphify: 'yes', Vyazen: 'yes' },
     },
     {
       capability: 'Blast-radius / impact analysis',
-      tools: { GitNexus: 'yes', Vyazen: 'yes' },
+      tools: { GitNexus: 'yes', Graphify: 'yes', Vyazen: 'yes' },
     },
     {
       capability: 'METHOD_OVERRIDES edges',
-      tools: { GitNexus: 'yes', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'no' },
     },
     {
       capability: 'ACCESSES edges (property access tracking)',
-      tools: { GitNexus: 'yes', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'no' },
+    },
+    {
+      capability: 'Generic identifier/property reference edges (references, not scored)',
+      tools: { GitNexus: 'no', Graphify: 'yes', Vyazen: 'no' },
     },
   ];
 
