@@ -26,31 +26,65 @@ export interface MatchResult {
   /** Tool nodes that matched an oracle node. */
   matched: Array<{ oracle: OracleSymbol; tool: GraphNode }>;
   matchedOracleLocalIds: Set<string>;
-  /** Oracle nodes the tool missed. */
-  oracleUnmatched: OracleSymbol[];
-  /** Tool nodes with no oracle counterpart. */
-  toolUnmatched: GraphNode[];
-  /** Fraction of tool nodes matched (0-1). If < 0.5, comparison is invalid. */
-  toolMatchRate: number;
   /** Fraction of oracle nodes matched (0-1). */
   oracleMatchRate: number;
+  /** Oracle nodes the tool missed. */
+  oracleUnmatched: OracleSymbol[];
+  /** Fraction of tool nodes matched (0-1). If < 0.5, comparison is invalid. */
+  toolMatchRate: number;
+  /** Tool nodes with no oracle counterpart. */
+  toolUnmatched: GraphNode[];
 }
 
 /** Normalize a path for matching: forward slashes, no leading ./, lowercase drive. */
 export function normalizePath(p: string): string {
   let s = p.replace(/\\/g, '/');
-  if (s.startsWith('./')) s = s.slice(2);
+  if (s.startsWith('./')) {
+    s = s.slice(2);
+  }
   // Strip a leading repo-root prefix if both sides have one — we rely on relative paths
   return s;
 }
 
 /** True if a name is matchable (not anonymous/computed). */
 function isMatchableName(name: string | undefined | null): boolean {
-  if (!name) return false;
-  if (name === '[computed]') return false;
-  if (name === '[anonymous]') return false;
-  if (name === 'default') return true; // export default is matchable
+  if (!name) {
+    return false;
+  }
+  if (name === '[computed]') {
+    return false;
+  }
+  if (name === '[anonymous]') {
+    return false;
+  }
+  if (name === 'default') {
+    return true; // export default is matchable
+  }
   return true;
+}
+
+/**
+ * Strip an accessor naming convention so `get:min`/`set:min` (the oracle's and
+ * Vyazen's convention) matches a plain `min` (GitNexus/Graphify/Potpie's
+ * convention). Per F1 in CODE_GRAPH_EVAL_FAIRNESS_PLAN.md: matching is
+ * name-exact, so without this every accessor is scored as both FP and FN for
+ * any tool that doesn't share the oracle's naming convention.
+ *
+ * Recognized conventions: `get:x` / `set:x`, `get x` / `set x`, `getter:x` /
+ * `setter:x`, `[get]x` / `[set]x`.
+ */
+export function canonicalName(name: string): string {
+  const bracketed = /^\[(?:get|set)\](.+)$/.exec(name);
+  if (bracketed) {
+    return bracketed[1];
+  }
+  const prefixed = /^(?:get|set)(?:ter)?[: ](.+)$/.exec(name);
+  return prefixed ? prefixed[1] : name;
+}
+
+/** True if a name uses a recognized accessor-prefix convention. */
+export function isAccessorName(name: string): boolean {
+  return canonicalName(name) !== name;
 }
 
 interface OracleIndexEntry {
@@ -65,8 +99,10 @@ interface OracleIndexEntry {
 function buildOracleIndex(oracle: OracleSymbol[]): Map<string, OracleSymbol[]> {
   const idx = new Map<string, OracleSymbol[]>();
   for (const sym of oracle) {
-    if (!isMatchableName(sym.name)) continue;
-    const key = `${normalizePath(sym.path)}\0${sym.name}`;
+    if (!isMatchableName(sym.name)) {
+      continue;
+    }
+    const key = `${normalizePath(sym.path)}\0${canonicalName(sym.name)}`;
     const bucket = idx.get(key);
     if (bucket) {
       bucket.push(sym);
@@ -86,7 +122,18 @@ function buildOracleIndex(oracle: OracleSymbol[]): Map<string, OracleSymbol[]> {
  * line delta (see the module header — doc-comment/decorator line conventions).
  */
 function pickBest(tool: GraphNode, candidates: OracleSymbol[]): OracleSymbol {
-  const sameKind = candidates.filter((c) => c.kind === tool.kind);
+  // Tools disagree on whether a getter/setter is a Method or a Property — that
+  // disagreement is not a fidelity failure (F1). If either side's raw name
+  // carries an accessor prefix, treat Method/Property as the same kind for
+  // tie-breaking purposes.
+  const accessorInvolved =
+    isAccessorName(tool.name) || candidates.some((c) => isAccessorName(c.name));
+  const isMethodOrProperty = (k: string) => k === 'Method' || k === 'Property';
+  const sameKind = candidates.filter((c) =>
+    accessorInvolved && isMethodOrProperty(c.kind) && isMethodOrProperty(tool.kind)
+      ? true
+      : c.kind === tool.kind
+  );
   const pool = sameKind.length > 0 ? sameKind : candidates;
 
   if (tool.startLine === null || tool.startLine === undefined) {
@@ -124,9 +171,11 @@ export function matchNodes(toolNodes: GraphNode[], oracle: OracleSymbol[]): Matc
   const claimKey = (s: OracleSymbol) => `${normalizePath(s.path)}\0${s.localId}`;
 
   for (const tool of toolNodes) {
-    if (!isMatchableName(tool.name)) continue;
+    if (!isMatchableName(tool.name)) {
+      continue;
+    }
 
-    const key = `${normalizePath(tool.path)}\0${tool.name}`;
+    const key = `${normalizePath(tool.path)}\0${canonicalName(tool.name)}`;
     const candidates = oracleIdx.get(key);
     if (!candidates || candidates.length === 0) {
       toolUnmatched.push(tool);
@@ -145,7 +194,8 @@ export function matchNodes(toolNodes: GraphNode[], oracle: OracleSymbol[]): Matc
   }
 
   const oracleUnmatched = oracle.filter(
-    (s) => !matchedOracleKeys.has(`${normalizePath(s.path)}\0${s.localId}`) && isMatchableName(s.name),
+    (s) =>
+      !matchedOracleKeys.has(`${normalizePath(s.path)}\0${s.localId}`) && isMatchableName(s.name)
   );
 
   const matchableToolCount = toolNodes.filter((n) => isMatchableName(n.name)).length;

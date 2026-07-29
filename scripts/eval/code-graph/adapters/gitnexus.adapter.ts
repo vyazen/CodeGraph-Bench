@@ -42,17 +42,21 @@ function runCypher(repoPath: string, cypher: string): Array<Record<string, strin
     parsed = JSON.parse(raw);
   } catch {
     // Output truncated at 64KB — caller should use paging
-    console.warn(`[gitnexus] JSON parse failed (likely truncated at 64KB). Use paging.`);
+    console.warn('[gitnexus] JSON parse failed (likely truncated at 64KB). Use paging.');
     return [];
   }
-  if (Array.isArray(parsed)) return [];
+  if (Array.isArray(parsed)) {
+    return [];
+  }
   if (typeof parsed === 'object' && parsed !== null) {
     const obj = parsed as { markdown?: string; error?: string };
     if (obj.error) {
       console.warn(`[gitnexus] Query error: ${obj.error}`);
       return [];
     }
-    if (!obj.markdown) return [];
+    if (!obj.markdown) {
+      return [];
+    }
     return parseMarkdownTable(obj.markdown);
   }
   return [];
@@ -66,11 +70,17 @@ function runCypherPaged(repoPath: string, baseCypher: string): Array<Record<stri
   while (true) {
     const paged = `${baseCypher} SKIP ${skip} LIMIT ${PAGE_SIZE}`;
     const rows = runCypher(repoPath, paged);
-    if (rows.length === 0) break;
+    if (rows.length === 0) {
+      break;
+    }
     allRows.push(...rows);
-    if (rows.length < PAGE_SIZE) break; // last page
+    if (rows.length < PAGE_SIZE) {
+      break; // last page
+    }
     skip += PAGE_SIZE;
-    if (skip % 5000 === 0) console.log(`[gitnexus]   ... ${skip} rows so far`);
+    if (skip % 5000 === 0) {
+      console.log(`[gitnexus]   ... ${skip} rows so far`);
+    }
   }
   return allRows;
 }
@@ -78,13 +88,15 @@ function runCypherPaged(repoPath: string, baseCypher: string): Array<Record<stri
 /** Parse a markdown table into an array of {column: value} records. */
 function parseMarkdownTable(md: string): Array<Record<string, string>> {
   const lines = md.split('\n').filter((l) => l.trim().startsWith('|'));
-  if (lines.length < 2) return [];
+  if (lines.length < 2) {
+    return [];
+  }
 
   const splitRow = (line: string): string[] =>
     line
       .split('|')
       .map((c) => c.trim())
-      .filter((c, i, arr) => !(i === 0 && c === '') && !(i === arr.length - 1 && c === ''));
+      .filter((c, i, arr) => !((i === 0 && c === '') || (i === arr.length - 1 && c === '')));
 
   const headers = splitRow(lines[0]);
   const rows: Array<Record<string, string>> = [];
@@ -100,18 +112,38 @@ function parseMarkdownTable(md: string): Array<Record<string, string>> {
 }
 
 export interface GitNexusAdapterOptions {
-  useCache?: boolean;
   outDir: string;
   repoPath: string;
+  useCache?: boolean;
 }
 
 const NODE_LABELS = [
-  'Class', 'Interface', 'Enum', 'TypeAlias', 'Function', 'Method',
-  'Constructor', 'Property', 'Variable', 'Const', 'Static', 'Module',
-  'Namespace', 'Struct', 'Record',
+  'Class',
+  'Interface',
+  'Enum',
+  'TypeAlias',
+  'Function',
+  'Method',
+  'Constructor',
+  'Property',
+  'Variable',
+  'Const',
+  'Static',
+  'Module',
+  'Namespace',
+  'Struct',
+  'Record',
 ];
 
-const EDGE_TYPES = ['CALLS', 'IMPORTS', 'EXT***REMOVED***S', 'IMPLEMENTS', 'METHOD_IMPLEMENTS', 'ACCESSES', 'METHOD_OVERRIDES'];
+const EDGE_TYPES = [
+  'CALLS',
+  'IMPORTS',
+  'EXT***REMOVED***S',
+  'IMPLEMENTS',
+  'METHOD_IMPLEMENTS',
+  'ACCESSES',
+  'METHOD_OVERRIDES',
+];
 
 // Labels that DON'T have startLine/endLine (structural nodes)
 const STRUCTURAL_LABELS = new Set(['File', 'Folder']);
@@ -132,9 +164,11 @@ export async function runGitNexusAdapter(opts: GitNexusAdapterOptions): Promise<
     const cypher = `MATCH (n:${label}) RETURN n.id AS id, n.name AS name, n.filePath AS filePath, n.startLine AS startLine, n.endLine AS endLine, '${label}' AS label`;
     const rows = runCypherPaged(opts.repoPath, cypher);
     for (const r of rows) {
-      if (!r.id || !r.name) continue;
-      const startLine = r.startLine ? parseInt(r.startLine, 10) : null;
-      const endLine = r.endLine ? parseInt(r.endLine, 10) : null;
+      if (!(r.id && r.name)) {
+        continue;
+      }
+      const startLine = r.startLine ? Number.parseInt(r.startLine, 10) : null;
+      const endLine = r.endLine ? Number.parseInt(r.endLine, 10) : null;
       allNodes.push({
         endLine: Number.isNaN(endLine as number) ? null : endLine,
         id: r.id,
@@ -151,9 +185,14 @@ export async function runGitNexusAdapter(opts: GitNexusAdapterOptions): Promise<
 
   // ── File nodes (no startLine) — needed as edge endpoints for IMPORTS ───────
   console.log('[gitnexus] Dumping File nodes...');
-  const fileRows = runCypherPaged(opts.repoPath, `MATCH (n:File) RETURN n.id AS id, n.name AS name, n.filePath AS filePath, '${'File'}' AS label`);
+  const fileRows = runCypherPaged(
+    opts.repoPath,
+    `MATCH (n:File) RETURN n.id AS id, n.name AS name, n.filePath AS filePath, '${'File'}' AS label`
+  );
   for (const r of fileRows) {
-    if (!r.id) continue;
+    if (!r.id) {
+      continue;
+    }
     allNodes.push({
       endLine: null,
       id: r.id,
@@ -175,14 +214,18 @@ export async function runGitNexusAdapter(opts: GitNexusAdapterOptions): Promise<
     const cypher = `MATCH (a)-[e:CodeRelation]->(b) WHERE e.type='${rawType}' RETURN a.id AS fromId, e.type AS type, e.confidence AS confidence, b.id AS toId, b.name AS toName`;
     const rows = runCypherPaged(opts.repoPath, cypher);
     for (const r of rows) {
-      if (!r.fromId || !r.toId) continue;
+      if (!(r.fromId && r.toId)) {
+        continue;
+      }
       const normalizedType = normalizeGitNexusEdgeType(r.type || rawType);
-      if (normalizedType === 'UNKNOWN') continue;
+      if (normalizedType === 'UNKNOWN') {
+        continue;
+      }
       allEdges.push({
-        confidence: r.confidence ? parseFloat(r.confidence) : null,
+        confidence: r.confidence ? Number.parseFloat(r.confidence) : null,
         edgeKind: r.type || rawType,
         fromId: r.fromId,
-        resolved: r.confidence ? parseFloat(r.confidence) >= 0.5 : null,
+        resolved: r.confidence ? Number.parseFloat(r.confidence) >= 0.5 : null,
         toId: r.toId,
         type: normalizedType,
       });
@@ -193,7 +236,9 @@ export async function runGitNexusAdapter(opts: GitNexusAdapterOptions): Promise<
 
   writeJsonl(nodesPath, allNodes);
   writeJsonl(edgesPath, allEdges);
-  console.log(`[gitnexus] Wrote ${allNodes.length} nodes, ${allEdges.length} edges to ${opts.outDir}`);
+  console.log(
+    `[gitnexus] Wrote ${allNodes.length} nodes, ${allEdges.length} edges to ${opts.outDir}`
+  );
 
   const meta: ToolMeta = {
     commitSha: '4efc0490',
@@ -225,7 +270,13 @@ function readCachedGraph(nodesPath: string, edgesPath: string): ToolGraph {
   console.log(`[gitnexus] Cached: ${nodes.length} nodes, ${edges.length} edges`);
   return {
     edges,
-    meta: { commitSha: '4efc0490', edgeCount: edges.length, name: 'GitNexus', nodeCount: nodes.length, version: '1.6.9' },
+    meta: {
+      commitSha: '4efc0490',
+      edgeCount: edges.length,
+      name: 'GitNexus',
+      nodeCount: nodes.length,
+      version: '1.6.9',
+    },
     nodes,
   };
 }

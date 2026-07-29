@@ -37,36 +37,38 @@ import type { GraphEdge, GraphNode, SymbolType, ToolGraph, ToolMeta } from '../t
 import { normalizeGraphifyEdgeType } from '../types';
 
 export interface GraphifyAdapterOptions {
-  useCache?: boolean;
   outDir: string;
   repoPath: string;
+  useCache?: boolean;
 }
 
 interface RawNode {
   id: string;
   label: string;
+  metadata?: { kind?: string; language?: string };
   source_file?: string;
   source_location?: string;
-  metadata?: { kind?: string; language?: string };
 }
 
 interface RawLink {
-  relation: string;
   confidence: string; // 'EXTRACTED' | 'INFERRED' | 'AMBIGUOUS' (never observed)
   confidence_score?: number;
+  relation: string;
   source: string;
   target: string;
 }
 
 interface RawGraph {
-  nodes: RawNode[];
-  links: RawLink[];
   built_at_commit?: string;
+  links: RawLink[];
+  nodes: RawNode[];
 }
 
 /** Parse "L48" → 48. Returns null for anything else (never observed, but the schema doesn't guarantee it). */
 function parseLineMarker(loc: string | undefined): number | null {
-  if (!loc) return null;
+  if (!loc) {
+    return null;
+  }
   const m = /^L(\d+)$/.exec(loc);
   return m ? Number.parseInt(m[1], 10) : null;
 }
@@ -79,7 +81,9 @@ function bareName(label: string): string {
 function classifyNodes(raw: RawGraph): Map<string, SymbolType> {
   const methodTargets = new Set<string>();
   for (const l of raw.links) {
-    if (l.relation === 'method') methodTargets.add(l.target);
+    if (l.relation === 'method') {
+      methodTargets.add(l.target);
+    }
   }
 
   const kinds = new Map<string, SymbolType>();
@@ -108,12 +112,14 @@ export async function runGraphifyAdapter(opts: GraphifyAdapterOptions): Promise<
   const graphJsonPath = join(opts.repoPath, 'graphify-out', 'graph.json');
   if (!existsSync(graphJsonPath)) {
     throw new Error(
-      `[graphify] ${graphJsonPath} not found — run \`graphify update ${opts.repoPath} --force\` first`,
+      `[graphify] ${graphJsonPath} not found — run \`graphify update ${opts.repoPath} --force\` first`
     );
   }
   console.log(`[graphify] Reading ${graphJsonPath}...`);
   const raw: RawGraph = JSON.parse(readFileSync(graphJsonPath, 'utf8'));
-  console.log(`[graphify] Raw: ${raw.nodes.length} nodes, ${raw.links.length} links (commit ${raw.built_at_commit ?? 'unknown'})`);
+  console.log(
+    `[graphify] Raw: ${raw.nodes.length} nodes, ${raw.links.length} links (commit ${raw.built_at_commit ?? 'unknown'})`
+  );
 
   const kinds = classifyNodes(raw);
 
@@ -151,14 +157,25 @@ export async function runGraphifyAdapter(opts: GraphifyAdapterOptions): Promise<
       type,
     });
   }
-  console.log(`[graphify] Nodes by kind: ${JSON.stringify(Object.fromEntries(
-    [...allNodes.reduce((m, n) => m.set(n.kind, (m.get(n.kind) ?? 0) + 1), new Map<string, number>())],
-  ))}`);
-  console.log(`[graphify] Edges: ${allEdges.length} mapped, ${unknownRelations} excluded (unmapped relation)`);
+  console.log(
+    `[graphify] Nodes by kind: ${JSON.stringify(
+      Object.fromEntries([
+        ...allNodes.reduce(
+          (m, n) => m.set(n.kind, (m.get(n.kind) ?? 0) + 1),
+          new Map<string, number>()
+        ),
+      ])
+    )}`
+  );
+  console.log(
+    `[graphify] Edges: ${allEdges.length} mapped, ${unknownRelations} excluded (unmapped relation)`
+  );
 
   writeJsonl(nodesPath, allNodes);
   writeJsonl(edgesPath, allEdges);
-  console.log(`[graphify] Wrote ${allNodes.length} nodes, ${allEdges.length} edges to ${opts.outDir}`);
+  console.log(
+    `[graphify] Wrote ${allNodes.length} nodes, ${allEdges.length} edges to ${opts.outDir}`
+  );
 
   const meta: ToolMeta = {
     commitSha: raw.built_at_commit ?? '4efc0490',

@@ -10,15 +10,19 @@
  * in ts-compiler.oracle.ts. It is the neutral ground truth.
  */
 
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { TsCompilerOracle, listSourceFiles, type OracleFileResultWithCalls } from './ts-compiler.oracle';
 import type { OracleEdge, OracleSymbol } from '../types';
+import {
+  listSourceFiles,
+  type OracleFileResultWithCalls,
+  TsCompilerOracle,
+} from './ts-compiler.oracle';
 
 export interface OracleRunOptions {
-  useCache?: boolean;
   outDir: string;
   repoPath: string;
+  useCache?: boolean;
 }
 
 export interface OracleData {
@@ -32,9 +36,15 @@ export async function runOracle(opts: OracleRunOptions): Promise<OracleData> {
   const edgesPath = join(opts.outDir, 'oracle-edges.jsonl');
 
   if (opts.useCache && existsSync(symbolsPath) && existsSync(edgesPath)) {
-    const symbols = readFileSync(symbolsPath, 'utf8').trim().split('\n').filter(Boolean)
+    const symbols = readFileSync(symbolsPath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
       .map((l) => JSON.parse(l) as OracleSymbol);
-    const edges = readFileSync(edgesPath, 'utf8').trim().split('\n').filter(Boolean)
+    const edges = readFileSync(edgesPath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
       .map((l) => JSON.parse(l) as OracleEdge);
     console.log(`[oracle] Cached: ${symbols.length} symbols, ${edges.length} edges`);
     return { edges, symbols };
@@ -96,14 +106,8 @@ export async function runOracle(opts: OracleRunOptions): Promise<OracleData> {
   console.log(`[oracle] ${edges.length} edges extracted (IMPORTS + EXT***REMOVED***S + IMPLEMENTS + CALLS)`);
 
   // Write cache
-  writeFileSync(
-    symbolsPath,
-    symbols.map((s) => JSON.stringify(s)).join('\n') + '\n',
-  );
-  writeFileSync(
-    edgesPath,
-    edges.map((e) => JSON.stringify(e)).join('\n') + '\n',
-  );
+  writeFileSync(symbolsPath, symbols.map((s) => JSON.stringify(s)).join('\n') + '\n');
+  writeFileSync(edgesPath, edges.map((e) => JSON.stringify(e)).join('\n') + '\n');
   console.log(`[oracle] Wrote to ${opts.outDir}`);
 
   return { edges, symbols };

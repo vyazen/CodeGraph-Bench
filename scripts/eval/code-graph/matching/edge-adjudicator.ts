@@ -8,13 +8,7 @@
  *    target name
  */
 
-import type {
-  EdgeType,
-  GraphEdge,
-  GraphNode,
-  OracleEdge,
-  OracleSymbol,
-} from '../types';
+import type { GraphEdge, GraphNode, OracleEdge, OracleSymbol } from '../types';
 
 export interface NodeMatch {
   oracle: OracleSymbol;
@@ -22,11 +16,6 @@ export interface NodeMatch {
 }
 
 export interface EdgeAdjudication {
-  falseNegatives: OracleEdge[];
-  falsePositives: GraphEdge[];
-  truePositives: GraphEdge[];
-  targetConfirmed: GraphEdge[];
-  nameOnlyConfirmed: GraphEdge[];
   /**
    * Abstentions: edges where the tool detected a relationship but did not
    * resolve a distinct target (`fromId === toId` with `resolved === false`).
@@ -35,18 +24,33 @@ export interface EdgeAdjudication {
    * to guess. Excluded from precision; reported separately (no silent drop).
    */
   abstained: GraphEdge[];
+  falseNegatives: OracleEdge[];
+  falsePositives: GraphEdge[];
+  /** F9 — the deduped/matched subset of `scoreableOracleEdges`, for call-site multiplicity ("siteCoverage") reporting. */
+  matchedOracleEdgesList: OracleEdge[];
+  nameOnlyConfirmed: GraphEdge[];
+  /** F9 — the oracle rows actually used as the recall denominator: `scoreable !== false` rows collapsed to unique (fromPath, fromLocalId, type, target), each carrying a summed `siteCount`. */
+  scoreableOracleEdges: OracleEdge[];
+  targetConfirmed: GraphEdge[];
+  truePositives: GraphEdge[];
+  /** F9 — oracle rows dropped before matching because `scoreable === false` (target knowably external, or unresolvable after every F10/F12 fallback). Reported as a coverage column, never folded into FN. */
+  unscoreableOracleEdges: OracleEdge[];
 }
 
 const LINE_TOLERANCE = 2;
 
 function indexNodesById(nodes: GraphNode[]): Map<string, GraphNode> {
   const m = new Map<string, GraphNode>();
-  for (const n of nodes) m.set(n.id, n);
+  for (const n of nodes) {
+    m.set(n.id, n);
+  }
   return m;
 }
 
 function linesMatch(a: number | null | undefined, b: number | null | undefined): boolean {
-  if (a === null || a === undefined || b === null || b === undefined) return false;
+  if (a === null || a === undefined || b === null || b === undefined) {
+    return false;
+  }
   return Math.abs(a - b) <= LINE_TOLERANCE;
 }
 
@@ -55,11 +59,18 @@ function normPath(p: string): string {
 }
 
 /**
- * Build oracle edge indices for O(1) lookup.
- * - byName: Map<`${fromLocalId}\0${type}\0${targetName}`, OracleEdge[]>
- * - byTargetPath: Map<`${fromLocalId}\0${type}\0${targetPath}`, OracleEdge[]>
- *   (for target-based matching, keyed by path; line matching done on candidates)
- * - byFromAndType: Map<`${fromLocalId}\0${type}`, OracleEdge[]>
+ * Build oracle edge indices for O(1) lookup, keyed on (fromPath, fromLocalId)
+ * rather than fromLocalId alone.
+ *
+ * F11: `localId` is not unique across files — a class/function/variable name
+ * like `_Registered` or `useStyles` recurs in hundreds of files. Keying on
+ * `fromLocalId` alone lets a tool edge in file A be "confirmed" by an oracle
+ * edge that actually originates from a same-named container in file B. Every
+ * oracle edge is path-qualified at push time (see `OracleEdge.fromPath`), so
+ * the fix is purely in how the index is keyed.
+ *
+ * - byName: Map<`${fromPath}\0${fromLocalId}\0${type}\0${targetName}`, OracleEdge[]>
+ * - byFromAndType: Map<`${fromPath}\0${fromLocalId}\0${type}`, OracleEdge[]>
  *   (for scanning all oracle edges from a given source with a given type)
  */
 function buildOracleIndices(oracleEdges: OracleEdge[]) {
@@ -67,18 +78,70 @@ function buildOracleIndices(oracleEdges: OracleEdge[]) {
   const byFromAndType = new Map<string, OracleEdge[]>();
 
   for (const e of oracleEdges) {
-    const nameKey = `${e.fromLocalId}\0${e.type}\0${e.targetName}`;
+    const ftKey = fromKey(e.fromPath, e.fromLocalId, e.type);
+    const nameKey = `${ftKey}\0${e.targetName}`;
     let arr = byName.get(nameKey);
-    if (!arr) { arr = []; byName.set(nameKey, arr); }
+    if (!arr) {
+      arr = [];
+      byName.set(nameKey, arr);
+    }
     arr.push(e);
 
-    const ftKey = `${e.fromLocalId}\0${e.type}`;
     let ftArr = byFromAndType.get(ftKey);
-    if (!ftArr) { ftArr = []; byFromAndType.set(ftKey, ftArr); }
+    if (!ftArr) {
+      ftArr = [];
+      byFromAndType.set(ftKey, ftArr);
+    }
     ftArr.push(e);
   }
 
   return { byFromAndType, byName };
+}
+
+function fromKey(fromPath: string, fromLocalId: string, type: string): string {
+  return `${normPath(fromPath)}\0${fromLocalId}\0${type}`;
+}
+
+function isScoreable(e: OracleEdge): boolean {
+  return e.scoreable !== false;
+}
+
+function targetKeyFor(e: OracleEdge): string {
+  return e.targetLocalId
+    ? `id:${normPath(e.targetPath ?? '')}\0${e.targetLocalId}`
+    : `name:${e.targetName}`;
+}
+
+/**
+ * F9 — collapse the oracle to unique (fromPath, fromLocalId, type, target)
+ * rows before adjudication, carrying `siteCount`, and set aside rows
+ * explicitly marked `scoreable: false` (target knowably external, or
+ * unresolvable after every F10/F12 fallback tried — see `OracleEdge.scoreable`
+ * in `types.ts`). Matching below is strictly 1:1 per oracle edge; without
+ * collapsing, a tool that emits ONE edge per unique (caller, target) pair —
+ * rather than one per call site — is hard-capped on recall by the oracle's own
+ * site-count, which measures call-site multiplicity, not tool quality.
+ */
+function prepareOracleEdges(oracleEdges: OracleEdge[]): {
+  edges: OracleEdge[];
+  unscoreable: OracleEdge[];
+} {
+  const unscoreable: OracleEdge[] = [];
+  const byKey = new Map<string, OracleEdge>();
+  for (const e of oracleEdges) {
+    if (!isScoreable(e)) {
+      unscoreable.push(e);
+      continue;
+    }
+    const key = `${fromKey(e.fromPath, e.fromLocalId, e.type)}\0${targetKeyFor(e)}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.siteCount = (existing.siteCount ?? 1) + (e.siteCount ?? 1);
+      continue;
+    }
+    byKey.set(key, { ...e, siteCount: e.siteCount ?? 1 });
+  }
+  return { edges: [...byKey.values()], unscoreable };
 }
 
 export function adjudicateEdges(
@@ -86,7 +149,7 @@ export function adjudicateEdges(
   toolNodes: GraphNode[],
   oracleEdges: OracleEdge[],
   nodeMatches: NodeMatch[],
-  _oracleSymbols: OracleSymbol[],
+  _oracleSymbols: OracleSymbol[]
 ): EdgeAdjudication {
   const toolNodeById = indexNodesById(toolNodes);
   const toolToOracle = new Map<string, OracleSymbol>();
@@ -94,7 +157,9 @@ export function adjudicateEdges(
     toolToOracle.set(m.tool.id, m.oracle);
   }
 
-  const { byFromAndType, byName } = buildOracleIndices(oracleEdges);
+  const { edges: scoreableOracleEdges, unscoreable: unscoreableOracleEdges } =
+    prepareOracleEdges(oracleEdges);
+  const { byFromAndType, byName } = buildOracleIndices(scoreableOracleEdges);
   const matchedOracleEdges = new Set<OracleEdge>();
 
   const truePositives: GraphEdge[] = [];
@@ -113,27 +178,35 @@ export function adjudicateEdges(
 
     const fromTool = toolNodeById.get(edge.fromId);
     const toTool = toolNodeById.get(edge.toId);
-    if (!fromTool || !toTool) {
+    if (!(fromTool && toTool)) {
       falsePositives.push(edge);
       continue;
     }
 
-    // Resolve oracle from-key. IMPORTS and module-scope calls (from a File node)
-    // are keyed by file path — the oracle attributes both to the file's relPath.
-    // Everything else is keyed by the from-node's matched oracle symbol.
-    let oracleFromKey: string;
+    // Resolve oracle from-key (path-qualified — F11). IMPORTS and module-scope
+    // calls (from a File node) are keyed by file path — the oracle attributes
+    // both to the file's relPath, so fromPath === fromLocalId there. Everything
+    // else is keyed by the from-node's matched oracle symbol's own (path,
+    // localId): localId alone is not unique across files (e.g. `_Registered`,
+    // `useStyles` recur in hundreds of files), so path-qualifying prevents a
+    // tool edge in file A from being confirmed by an oracle edge that actually
+    // originates in a same-named container in file B.
+    let oracleFromPath: string;
+    let oracleFromLocalId: string;
     if (edge.type === 'IMPORTS' || fromTool.kind === 'File') {
-      oracleFromKey = fromTool.path;
+      oracleFromPath = fromTool.path;
+      oracleFromLocalId = fromTool.path;
     } else {
       const oracleSym = toolToOracle.get(edge.fromId);
       if (!oracleSym) {
         falsePositives.push(edge);
         continue;
       }
-      oracleFromKey = oracleSym.localId;
+      oracleFromPath = oracleSym.path;
+      oracleFromLocalId = oracleSym.localId;
     }
 
-    const ftKey = `${oracleFromKey}\0${edge.type}`;
+    const ftKey = fromKey(oracleFromPath, oracleFromLocalId, edge.type);
     const candidates = byFromAndType.get(ftKey);
     if (!candidates) {
       falsePositives.push(edge);
@@ -153,8 +226,12 @@ export function adjudicateEdges(
     const toOracle = toolToOracle.get(edge.toId);
     let matched = false;
     for (const cand of candidates) {
-      if (matchedOracleEdges.has(cand)) continue;
-      if (!cand.targetPath) continue; // oracle didn't resolve this one
+      if (matchedOracleEdges.has(cand)) {
+        continue;
+      }
+      if (!cand.targetPath) {
+        continue; // oracle didn't resolve this one
+      }
 
       let hit = false;
       if (toOracle && cand.targetLocalId) {
@@ -177,14 +254,18 @@ export function adjudicateEdges(
       }
     }
 
-    if (matched) continue;
+    if (matched) {
+      continue;
+    }
 
     // Tier 2: Name-based fallback
-    const nameKey = `${oracleFromKey}\0${edge.type}\0${toTool.name}`;
+    const nameKey = `${ftKey}\0${toTool.name}`;
     const nameCandidates = byName.get(nameKey);
     if (nameCandidates) {
       for (const cand of nameCandidates) {
-        if (matchedOracleEdges.has(cand)) continue;
+        if (matchedOracleEdges.has(cand)) {
+          continue;
+        }
         matchedOracleEdges.add(cand);
         truePositives.push(edge);
         nameOnlyConfirmed.push(edge);
@@ -198,13 +279,24 @@ export function adjudicateEdges(
     }
   }
 
-  // FN = oracle edges not matched
+  // FN = scoreable oracle edges not matched (F9: unscoreable rows never enter
+  // this denominator — they're reported separately via `unscoreableOracleEdges`).
   const falseNegatives: OracleEdge[] = [];
-  for (const e of oracleEdges) {
+  for (const e of scoreableOracleEdges) {
     if (!matchedOracleEdges.has(e)) {
       falseNegatives.push(e);
     }
   }
 
-  return { truePositives, falsePositives, falseNegatives, targetConfirmed, nameOnlyConfirmed, abstained };
+  return {
+    truePositives,
+    falsePositives,
+    falseNegatives,
+    targetConfirmed,
+    nameOnlyConfirmed,
+    abstained,
+    scoreableOracleEdges,
+    unscoreableOracleEdges,
+    matchedOracleEdgesList: [...matchedOracleEdges],
+  };
 }

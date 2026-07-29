@@ -18,7 +18,7 @@
  * The type checker loads the entire program into memory (~2-4 GB RSS).
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
 import type { EdgeType, OracleEdge, OracleSymbol, SymbolType } from '../types';
@@ -37,10 +37,20 @@ export interface TypeCheckerOracleOptions {
   useCache?: boolean;
 }
 
+type PushEdgeFn = (
+  from: string,
+  name: string,
+  type: EdgeType,
+  sym: ts.Symbol | null,
+  tier?: OracleEdge['resolutionTier']
+) => OracleEdge;
+
 /** Get the relative path of a source file, or null if it's outside the repo. */
 function getRelPath(repoPath: string, fileName: string): string | null {
   const rel = relative(repoPath, fileName);
-  if (rel.startsWith('..') || rel.includes('node_modules')) return null;
+  if (rel.startsWith('..') || rel.includes('node_modules')) {
+    return null;
+  }
   return rel.replace(/\\/g, '/');
 }
 
@@ -76,12 +86,12 @@ function getLocalId(node: ts.Node, sourceFile: ts.SourceFile, name: string): str
 function resolveSymbolLocation(
   checker: ts.TypeChecker,
   symbol: ts.Symbol,
-  repoPath: string,
+  repoPath: string
 ): { localId: string; path: string; startLine: number } | null {
   // Follow alias symbols (e.g. re-exports) to the real declaration
   let resolved = symbol;
   let depth = 0;
-  while ((resolved.flags & ts.SymbolFlags.Alias) && depth < 5) {
+  while (resolved.flags & ts.SymbolFlags.Alias && depth < 5) {
     try {
       resolved = checker.getAliasedSymbol(resolved);
     } catch {
@@ -91,11 +101,15 @@ function resolveSymbolLocation(
   }
 
   const decl = resolved.valueDeclaration ?? resolved.declarations?.[0];
-  if (!decl) return null;
+  if (!decl) {
+    return null;
+  }
 
   const sourceFile = decl.getSourceFile();
   const relPath = getRelPath(repoPath, sourceFile.fileName);
-  if (!relPath) return null; // External (node_modules or .d.ts)
+  if (!relPath) {
+    return null; // External (node_modules) or outside the repo
+  }
 
   const startLine = getStartLine(decl, sourceFile);
   const name = resolved.getName();
@@ -104,39 +118,178 @@ function resolveSymbolLocation(
   return { localId, path: relPath, startLine };
 }
 
-/** Extract the callee symbol from a CallExpression. */
-function getCalleeSymbol(
-  checker: ts.TypeChecker,
-  callExpr: ts.CallExpression,
-): ts.Symbol | null {
-  // For `foo()`: symbol of `foo`
-  // For `obj.bar()`: symbol of the property access `obj.bar`
-  // For `Class.method()`: symbol of the property access
-  const expr = callExpr.expression;
-  const symbol = checker.getSymbolAtLocation(expr);
-  if (symbol) return symbol;
-
-  // For parenthesized expressions, try the inner expression
-  if (ts.isParenthesizedExpression(expr)) {
-    return getCalleeSymbol(checker, ts.factory.createCallExpression(expr.expression, undefined, callExpr.arguments));
-  }
-
-  // For `new ClassName()`: the constructor
-  if (ts.isNewExpression(callExpr)) {
-    const classSymbol = checker.getSymbolAtLocation(callExpr.expression);
-    if (classSymbol) {
-      // Get the constructor declaration
-      const classType = checker.getTypeOfSymbolAtLocation(classSymbol, callExpr);
-      const constructSignatures = classType.getConstructSignatures();
-      if (constructSignatures.length > 0) {
-        return constructSignatures[0].declaration
-          ? checker.getSymbolAtLocation(callExpr.expression)
-          : null;
+/**
+ * Resolve a `ts.Declaration` back to its own symbol. Used by the F10
+ * call-resolution cascade for declarations returned by
+ * `getResolvedSignature()` that don't come with a symbol attached directly
+ * (e.g. constructors have no `.name`, so `getSymbolAtLocation` needs a named
+ * node — fall back to the declaration's bound `.symbol`).
+ */
+function symbolFromDeclaration(checker: ts.TypeChecker, decl: ts.Declaration): ts.Symbol | null {
+  const named = decl as unknown as { name?: ts.Node };
+  if (named.name) {
+    try {
+      const sym = checker.getSymbolAtLocation(named.name);
+      if (sym) {
+        return sym;
       }
+    } catch {
+      // fall through to the raw-symbol fallback below
+    }
+  }
+  const withSymbol = decl as unknown as { symbol?: ts.Symbol };
+  return withSymbol.symbol ?? null;
+}
+
+/**
+ * Resolve a heritage clause's base-type symbol (F12). `getSymbolAtLocation`
+ * only works for identifier expressions (`extends Base`); mixin-call heritage
+ * (`extends Mixin(Base)`) has no symbol at the call-expression location, so
+ * fall back to the *type* of the expression, which the checker can still
+ * compute even though there's no declaration symbol to point at directly.
+ */
+function resolveHeritageBaseSymbol(
+  checker: ts.TypeChecker,
+  typeRef: ts.ExpressionWithTypeArguments
+): ts.Symbol | null {
+  const direct = checker.getSymbolAtLocation(typeRef.expression);
+  if (direct) {
+    return direct;
+  }
+  try {
+    const type = checker.getTypeAtLocation(typeRef.expression);
+    return type.getSymbol() ?? type.aliasSymbol ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Strip non-null assertions / redundant parens around a callee expression, for retrying resolution (F10 tier 4). */
+function stripCalleeWrapping(expr: ts.Expression): ts.Expression | null {
+  let e: ts.Expression = expr;
+  let changed = false;
+  for (;;) {
+    if (ts.isNonNullExpression(e)) {
+      e = e.expression;
+      changed = true;
+      continue;
+    }
+    if (ts.isParenthesizedExpression(e)) {
+      e = e.expression;
+      changed = true;
+      continue;
+    }
+    break;
+  }
+  return changed ? e : null;
+}
+
+/**
+ * True when `expr` is a property access whose receiver is a union type with
+ * more than one constituent declaring the property — e.g. `pet.speak()` for
+ * `pet: Cat | Dog` where both declare `speak`. Both `getSymbolAtLocation` and
+ * `getResolvedSignature` collapse this to a single (arbitrarily-picked)
+ * constituent's declaration; tier 3 is the only tier that reports one edge
+ * per distinct in-repo declaration, so tiers 1-2 must defer to it here.
+ */
+function isMultiTargetUnionPropertyAccess(
+  checker: ts.TypeChecker,
+  expr: ts.Expression
+): expr is ts.PropertyAccessExpression {
+  if (!ts.isPropertyAccessExpression(expr)) {
+    return false;
+  }
+  try {
+    const receiverType = checker.getTypeAtLocation(expr.expression);
+    if (!receiverType.isUnion()) {
+      return false;
+    }
+    let count = 0;
+    for (const t of receiverType.types) {
+      if (t.getProperty(expr.name.text)) {
+        count++;
+      }
+    }
+    return count > 1;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * F10 — cascade of call-resolution strategies, first hit wins. Each tier
+ * handles receivers the previous one gives up on: plain identifiers and most
+ * property accesses resolve at tier 1; overloaded/generic-instantiated calls
+ * need the resolved *signature* (tier 2); union-typed receivers need the
+ * type of the receiver expression, not the call (tier 3, one symbol per
+ * distinct in-repo declaration); everything else gets one retry after
+ * stripping non-null/paren wrapping (tier 4).
+ */
+function resolveCalleeSymbols(
+  checker: ts.TypeChecker,
+  node: ts.CallExpression | ts.NewExpression
+): { symbols: ts.Symbol[]; tier: NonNullable<OracleEdge['resolutionTier']> } {
+  const expr = node.expression;
+  const deferToUnionTier = isMultiTargetUnionPropertyAccess(checker, expr);
+
+  if (!deferToUnionTier) {
+    try {
+      const sym = checker.getSymbolAtLocation(expr);
+      if (sym) {
+        return { symbols: [sym], tier: 'symbol' };
+      }
+    } catch {
+      // fall through
+    }
+
+    try {
+      const sig = checker.getResolvedSignature(node);
+      const decl = sig?.declaration;
+      if (decl) {
+        const sym = symbolFromDeclaration(checker, decl);
+        if (sym) {
+          return { symbols: [sym], tier: 'signature' };
+        }
+      }
+    } catch {
+      // fall through
     }
   }
 
-  return null;
+  if (ts.isPropertyAccessExpression(expr)) {
+    try {
+      const receiverType = checker.getTypeAtLocation(expr.expression);
+      const constituents = receiverType.isUnion() ? receiverType.types : [receiverType];
+      const symbols: ts.Symbol[] = [];
+      const seen = new Set<ts.Symbol>();
+      for (const t of constituents) {
+        const prop = t.getProperty(expr.name.text);
+        if (prop && !seen.has(prop)) {
+          seen.add(prop);
+          symbols.push(prop);
+        }
+      }
+      if (symbols.length > 0) {
+        return { symbols, tier: 'property' };
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  const stripped = stripCalleeWrapping(expr);
+  if (stripped) {
+    try {
+      const sym = checker.getSymbolAtLocation(stripped);
+      if (sym) {
+        return { symbols: [sym], tier: 'optional-chain-stripped' };
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  return { symbols: [], tier: 'unresolved' };
 }
 
 export class TsTypeCheckerOracle {
@@ -150,13 +303,11 @@ export class TsTypeCheckerOracle {
     if (configFile.error) {
       throw new Error(`tsconfig parse error: ${configFile.error.messageText}`);
     }
-    const parsedConfig = ts.parseJsonConfigFileContent(
-      configFile.config,
-      ts.sys,
-      repoPath,
-    );
+    const parsedConfig = ts.parseJsonConfigFileContent(configFile.config, ts.sys, repoPath);
 
-    console.log(`[typechecker-oracle] Creating TS Program with ${parsedConfig.fileNames.length} files...`);
+    console.log(
+      `[typechecker-oracle] Creating TS Program with ${parsedConfig.fileNames.length} files...`
+    );
 
     // 2. Create Program (with skipLibCheck for speed, noEmit since we only read)
     const program = ts.createProgram({
@@ -170,7 +321,7 @@ export class TsTypeCheckerOracle {
       },
     });
 
-    console.log(`[typechecker-oracle] Program created. Getting type checker...`);
+    console.log('[typechecker-oracle] Program created. Getting type checker...');
     const checker = program.getTypeChecker();
 
     // 3. Walk each source file
@@ -178,9 +329,13 @@ export class TsTypeCheckerOracle {
     const edges: OracleEdge[] = [];
     let resolvedCount = 0;
 
-    const sourceFiles = program.getSourceFiles().filter(
-      (sf) => !sf.isDeclarationFile && getRelPath(repoPath, sf.fileName) !== null,
-    );
+    // F3: `.d.ts` files are indexed too (policy (a) — the alternative is
+    // excluding them from every tool's node set as well, which would throw
+    // away real symbols tools do extract). `getRelPath` still excludes
+    // node_modules and anything outside the repo.
+    const sourceFiles = program
+      .getSourceFiles()
+      .filter((sf) => getRelPath(repoPath, sf.fileName) !== null);
     console.log(`[typechecker-oracle] Analyzing ${sourceFiles.length} source files...`);
 
     let fileNum = 0;
@@ -197,7 +352,9 @@ export class TsTypeCheckerOracle {
       resolvedCount += result.resolvedCount;
     }
 
-    console.log(`[typechecker-oracle] Done: ${symbols.length} symbols, ${edges.length} edges (${resolvedCount} resolved)`);
+    console.log(
+      `[typechecker-oracle] Done: ${symbols.length} symbols, ${edges.length} edges (${resolvedCount} resolved)`
+    );
 
     return { edges, resolvedCount, symbols, totalEdges: edges.length };
   }
@@ -206,7 +363,7 @@ export class TsTypeCheckerOracle {
     sourceFile: ts.SourceFile,
     checker: ts.TypeChecker,
     repoPath: string,
-    relPath: string,
+    relPath: string
   ): { edges: OracleEdge[]; resolvedCount: number; symbols: OracleSymbol[] } {
     const symbols: OracleSymbol[] = [];
     const edges: OracleEdge[] = [];
@@ -220,7 +377,7 @@ export class TsTypeCheckerOracle {
       name: string,
       kind: SymbolType,
       parentLocalId: string | null,
-      node: ts.Node,
+      node: ts.Node
     ) => {
       symbols.push({
         endLine: getLine(node.getEnd()),
@@ -234,13 +391,11 @@ export class TsTypeCheckerOracle {
     };
 
     // ── Edge extraction with type-checker resolution ─────────────────────────
-    const pushEdge = (
-      fromLocalId: string,
-      targetName: string,
-      type: EdgeType,
-      targetSymbol: ts.Symbol | null,
-    ) => {
-      const edge: OracleEdge = { fromLocalId, targetName, type };
+    const pushEdge: PushEdgeFn = (fromLocalId, targetName, type, targetSymbol, tier) => {
+      const edge: OracleEdge = { fromLocalId, fromPath: relPath, targetName, type };
+      if (tier) {
+        edge.resolutionTier = tier;
+      }
 
       if (targetSymbol) {
         const loc = resolveSymbolLocation(checker, targetSymbol, repoPath);
@@ -253,6 +408,7 @@ export class TsTypeCheckerOracle {
       }
 
       edges.push(edge);
+      return edge;
     };
 
     // Track the current container (for call site attribution)
@@ -264,47 +420,113 @@ export class TsTypeCheckerOracle {
         const cname = node.name.text;
         currentContainer = cname;
         pushSym(cname, cname, 'Class', null, node);
+        this.extractTypeParameterUsage(node.typeParameters, checker, cname, pushEdge);
 
-        // Heritage clauses (extends + implements)
+        // Heritage clauses (extends + implements). Track the immediate base
+        // class's type (F7 — nearest-ancestor override resolution) and the
+        // implemented interfaces' types (F8 — member-level IMPLEMENTS) for
+        // the member loop below.
+        let baseClassType: ts.Type | null = null;
+        const implementedTypes: ts.Type[] = [];
         for (const clause of node.heritageClauses ?? []) {
           for (const typeRef of clause.types) {
             const baseName = ts.isIdentifier(typeRef.expression)
               ? typeRef.expression.text
               : '[expr]';
-            const baseSymbol = checker.getSymbolAtLocation(typeRef.expression);
-            const edgeType: EdgeType = clause.token === ts.SyntaxKind.ExtendsKeyword ? 'EXT***REMOVED***S' : 'IMPLEMENTS';
-            pushEdge(cname, baseName, edgeType, baseSymbol);
+            const baseSymbol = resolveHeritageBaseSymbol(checker, typeRef);
+            const edgeType: EdgeType =
+              clause.token === ts.SyntaxKind.ExtendsKeyword ? 'EXT***REMOVED***S' : 'IMPLEMENTS';
+            const edge = pushEdge(cname, baseName, edgeType, baseSymbol);
+            if (!edge.targetLocalId && baseName === '[expr]') {
+              // F12: still unresolvable after the type-based fallback — don't
+              // let it sit silently in a recall denominator no tool can hit.
+              edge.scoreable = false;
+            }
+
+            // F4: heritage type arguments (`extends Base<Foo>`) are type usage.
+            for (const ta of typeRef.typeArguments ?? []) {
+              this.extractTypeUsage(ta, checker, cname, pushEdge);
+            }
+
+            try {
+              const t = checker.getTypeAtLocation(typeRef);
+              if (clause.token === ts.SyntaxKind.ExtendsKeyword) {
+                baseClassType = t;
+              } else {
+                implementedTypes.push(t);
+              }
+            } catch {
+              // leave unresolved — override/implements-member checks below no-op
+            }
           }
         }
 
         // Class members
         for (const member of node.members) {
           if (ts.isConstructorDeclaration(member)) {
-            pushSym(`${cname}.constructor`, 'constructor', 'Constructor', cname, member);
-            currentContainer = `${cname}.constructor`;
-            this.visitCallSites(member, checker, `${cname}.constructor`, pushEdge);
+            const localId = `${cname}.constructor`;
+            pushSym(localId, 'constructor', 'Constructor', cname, member);
+            this.extractSignatureTypeUsage(member, checker, localId, pushEdge);
+            currentContainer = localId;
+            this.visitCallSites(member, checker, localId, pushEdge);
+            this.visitTypeCasts(member, checker, localId, pushEdge);
             ts.forEachChild(member, visit);
             currentContainer = cname;
           } else if (ts.isMethodDeclaration(member) && member.name) {
             const mname = member.name.getText(sourceFile);
-            pushSym(`${cname}.${mname}`, mname, 'Method', cname, member);
-            currentContainer = `${cname}.${mname}`;
-            this.visitCallSites(member, checker, `${cname}.${mname}`, pushEdge);
-            this.visitPropertyAccesses(member, checker, `${cname}.${mname}`, pushEdge);
+            const localId = `${cname}.${mname}`;
+            pushSym(localId, mname, 'Method', cname, member);
+            this.extractSignatureTypeUsage(member, checker, localId, pushEdge);
+
+            // F7: does this method override an ancestor's method of the same name?
+            if (baseClassType) {
+              this.emitOverrideIfAny(baseClassType, mname, localId, repoPath, checker, pushEdge);
+            }
+            // F8: does this method satisfy a member of an implemented interface?
+            for (const it of implementedTypes) {
+              this.emitMemberImplementsIfAny(it, mname, localId, checker, pushEdge);
+            }
+
+            currentContainer = localId;
+            this.visitCallSites(member, checker, localId, pushEdge);
+            this.visitPropertyAccesses(member, checker, localId, pushEdge);
+            this.visitTypeCasts(member, checker, localId, pushEdge);
             ts.forEachChild(member, visit);
             currentContainer = cname;
           } else if (ts.isGetAccessor(member)) {
             const aname = member.name.getText(sourceFile);
-            pushSym(`${cname}.get:${aname}`, `get:${aname}`, 'Method', cname, member);
+            const localId = `${cname}.get:${aname}`;
+            pushSym(localId, `get:${aname}`, 'Method', cname, member);
+            this.extractSignatureTypeUsage(member, checker, localId, pushEdge);
+            // F5: accessor bodies are call/property-access/cast sites too.
+            if (member.body) {
+              this.visitCallSites(member.body, checker, localId, pushEdge);
+              this.visitPropertyAccesses(member.body, checker, localId, pushEdge);
+              this.visitTypeCasts(member.body, checker, localId, pushEdge);
+            }
           } else if (ts.isSetAccessor(member)) {
             const aname = member.name.getText(sourceFile);
-            pushSym(`${cname}.set:${aname}`, `set:${aname}`, 'Method', cname, member);
+            const localId = `${cname}.set:${aname}`;
+            pushSym(localId, `set:${aname}`, 'Method', cname, member);
+            this.extractSignatureTypeUsage(member, checker, localId, pushEdge);
+            if (member.body) {
+              this.visitCallSites(member.body, checker, localId, pushEdge);
+              this.visitPropertyAccesses(member.body, checker, localId, pushEdge);
+              this.visitTypeCasts(member.body, checker, localId, pushEdge);
+            }
           } else if (ts.isPropertyDeclaration(member) && member.name) {
             const pname = member.name.getText(sourceFile);
-            pushSym(`${cname}.${pname}`, pname, 'Property', cname, member);
+            const localId = `${cname}.${pname}`;
+            pushSym(localId, pname, 'Property', cname, member);
             // USES_TYPE: if the property has a type annotation
             if (member.type) {
-              this.extractTypeUsage(member.type, checker, `${cname}.${pname}`, pushEdge);
+              this.extractTypeUsage(member.type, checker, localId, pushEdge);
+            }
+            // F5: property initialisers are call/property-access/cast sites too.
+            if (member.initializer) {
+              this.visitCallSites(member.initializer, checker, localId, pushEdge);
+              this.visitPropertyAccesses(member.initializer, checker, localId, pushEdge);
+              this.visitTypeCasts(member.initializer, checker, localId, pushEdge);
             }
           }
         }
@@ -313,6 +535,7 @@ export class TsTypeCheckerOracle {
       else if (ts.isInterfaceDeclaration(node) && node.name) {
         const iname = node.name.text;
         pushSym(iname, iname, 'Interface', null, node);
+        this.extractTypeParameterUsage(node.typeParameters, checker, iname, pushEdge);
 
         // Interfaces can extend other interfaces
         for (const clause of node.heritageClauses ?? []) {
@@ -320,20 +543,29 @@ export class TsTypeCheckerOracle {
             const baseName = ts.isIdentifier(typeRef.expression)
               ? typeRef.expression.text
               : '[expr]';
-            const baseSymbol = checker.getSymbolAtLocation(typeRef.expression);
-            pushEdge(iname, baseName, 'EXT***REMOVED***S', baseSymbol);
+            const baseSymbol = resolveHeritageBaseSymbol(checker, typeRef);
+            const edge = pushEdge(iname, baseName, 'EXT***REMOVED***S', baseSymbol);
+            if (!edge.targetLocalId && baseName === '[expr]') {
+              edge.scoreable = false; // F12
+            }
+            for (const ta of typeRef.typeArguments ?? []) {
+              this.extractTypeUsage(ta, checker, iname, pushEdge); // F4
+            }
           }
         }
 
         for (const member of node.members) {
           if (ts.isMethodSignature(member) && member.name) {
             const mname = member.name.getText(sourceFile);
-            pushSym(`${iname}.${mname}`, mname, 'Method', iname, member);
+            const localId = `${iname}.${mname}`;
+            pushSym(localId, mname, 'Method', iname, member);
+            this.extractSignatureTypeUsage(member, checker, localId, pushEdge);
           } else if (ts.isPropertySignature(member) && member.name) {
             const pname = member.name.getText(sourceFile);
-            pushSym(`${iname}.${pname}`, pname, 'Property', iname, member);
+            const localId = `${iname}.${pname}`;
+            pushSym(localId, pname, 'Property', iname, member);
             if (member.type) {
-              this.extractTypeUsage(member.type, checker, `${iname}.${pname}`, pushEdge);
+              this.extractTypeUsage(member.type, checker, localId, pushEdge);
             }
           }
         }
@@ -351,32 +583,40 @@ export class TsTypeCheckerOracle {
       else if (ts.isTypeAliasDeclaration(node) && node.name) {
         const tname = node.name.text;
         pushSym(tname, tname, 'Alias', null, node);
+        this.extractTypeParameterUsage(node.typeParameters, checker, tname, pushEdge);
+        this.extractTypeUsage(node.type, checker, tname, pushEdge); // F4: alias body
       }
       // ── Function declarations ────────────────────────────────────────────
       else if (ts.isFunctionDeclaration(node) && node.name) {
         const fname = node.name.text;
         pushSym(fname, fname, 'Function', null, node);
+        this.extractSignatureTypeUsage(node, checker, fname, pushEdge);
         currentContainer = fname;
         this.visitCallSites(node, checker, fname, pushEdge);
         this.visitPropertyAccesses(node, checker, fname, pushEdge);
+        this.visitTypeCasts(node, checker, fname, pushEdge);
         ts.forEachChild(node, visit);
         currentContainer = null;
       }
       // ── Variable statements (including arrow functions) ─────────────────
       else if (ts.isVariableStatement(node)) {
         for (const decl of node.declarationList.declarations) {
-          if (!ts.isIdentifier(decl.name)) continue;
+          if (!ts.isIdentifier(decl.name)) {
+            continue;
+          }
           const vname = decl.name.text;
-          const isFn = decl.initializer && (
-            ts.isArrowFunction(decl.initializer) ||
-            ts.isFunctionExpression(decl.initializer)
-          );
+          const isFn =
+            decl.initializer &&
+            (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer));
           pushSym(vname, vname, isFn ? 'Function' : 'GlobalVariable', null, node);
           if (isFn && decl.initializer) {
+            const fnNode = decl.initializer as ts.ArrowFunction | ts.FunctionExpression;
+            this.extractSignatureTypeUsage(fnNode, checker, vname, pushEdge);
             currentContainer = vname;
-            this.visitCallSites(decl.initializer, checker, vname, pushEdge);
-            this.visitPropertyAccesses(decl.initializer, checker, vname, pushEdge);
-            ts.forEachChild(decl.initializer, visit);
+            this.visitCallSites(fnNode, checker, vname, pushEdge);
+            this.visitPropertyAccesses(fnNode, checker, vname, pushEdge);
+            this.visitTypeCasts(fnNode, checker, vname, pushEdge);
+            ts.forEachChild(fnNode, visit);
             currentContainer = null;
           }
           // USES_TYPE: variable type annotations
@@ -393,13 +633,13 @@ export class TsTypeCheckerOracle {
           if (clause.name) {
             // Default import
             const importName = clause.name.text;
-            const symbol = checker.getSymbolAtLocation(clause.name);
+            const symbol = checker.getSymbolAtLocation(clause.name) ?? null;
             pushEdge(relPath, importName, 'IMPORTS', symbol);
           }
           if (clause.namedBindings) {
             if (ts.isNamespaceImport(clause.namedBindings)) {
               const nsName = clause.namedBindings.name.text;
-              const symbol = checker.getSymbolAtLocation(clause.namedBindings.name);
+              const symbol = checker.getSymbolAtLocation(clause.namedBindings.name) ?? null;
               pushEdge(relPath, nsName, 'IMPORTS', symbol);
             } else {
               for (const el of clause.namedBindings.elements) {
@@ -409,7 +649,7 @@ export class TsTypeCheckerOracle {
                 // never target-resolved (only 1.4% of all imports resolved).
                 // getSymbolAtLocation(el.name) returns the local alias symbol,
                 // which resolveSymbolLocation then follows to the real declaration.
-                const symbol = checker.getSymbolAtLocation(el.name);
+                const symbol = checker.getSymbolAtLocation(el.name) ?? null;
                 pushEdge(relPath, elName, 'IMPORTS', symbol);
               }
             }
@@ -419,15 +659,36 @@ export class TsTypeCheckerOracle {
           pushEdge(relPath, moduleSpecifier, 'IMPORTS', null);
         }
       }
-
-    // NOTE: Do NOT recurse into function/method bodies here — that would
-    // extract local variables as GlobalVariables. Call site extraction is
-    // handled separately by visitCallSites/visitPropertyAccesses.
-    // Only recurse into namespaces/modules (which contain top-level decls).
-    if (ts.isModuleDeclaration(node)) {
-      ts.forEachChild(node, visit);
-    }
-  };
+      // ── Module / namespace / global-augmentation declarations ───────────
+      // F3: `ts.forEachChild` on a ModuleDeclaration yields the ModuleBlock,
+      // which the old code never descended into — nothing declared inside
+      // `declare module "…" { … }` or `declare global { … }` was ever
+      // emitted. Emit a symbol for the module/namespace itself, then recurse
+      // into its body's statements directly. Declaration merging (the same
+      // interface name augmented from multiple files) falls out for free:
+      // each occurrence is its own `visit` call, pushed with its own `path`.
+      else if (ts.isModuleDeclaration(node)) {
+        // `.text` (not `.getText()`) so a string-literal specifier comes
+        // through as `./x`, not the quoted source text `"./x"`.
+        const mname = node.name.text;
+        const kind: SymbolType = ts.isStringLiteral(node.name) ? 'Module' : 'Namespace';
+        pushSym(mname, mname, kind, null, node);
+        const prevContainer = currentContainer;
+        currentContainer = mname;
+        if (node.body) {
+          if (ts.isModuleBlock(node.body)) {
+            for (const stmt of node.body.statements) {
+              visit(stmt);
+            }
+          } else if (ts.isModuleDeclaration(node.body)) {
+            // Dotted namespace (`namespace A.B.C {}`) parses as nested
+            // ModuleDeclarations — recurse directly into the next one.
+            visit(node.body);
+          }
+        }
+        currentContainer = prevContainer;
+      }
+    };
 
     ts.forEachChild(sourceFile, visit);
 
@@ -447,7 +708,9 @@ export class TsTypeCheckerOracle {
    */
   private isNameBound(fn: ts.Node): boolean {
     const p = fn.parent;
-    if (!p) return false;
+    if (!p) {
+      return false;
+    }
     return (
       ts.isVariableDeclaration(p) ||
       ts.isPropertyDeclaration(p) ||
@@ -463,31 +726,49 @@ export class TsTypeCheckerOracle {
    * inline) so their calls are attributed to `containerLocalId` — matching how
    * both tools attribute callback calls. Stops at nested named functions, class
    * fields/accessors, and class/interface declarations, which are captured as
-   * their own containers (or deliberately skipped, for accessors/fields).
+   * their own containers (F5: or, for accessors/fields, called directly on
+   * their own body/initializer by the caller — see the class-member loop above).
    */
   private visitCallSites(
     node: ts.Node,
     checker: ts.TypeChecker,
     containerLocalId: string,
-    pushEdge: (from: string, name: string, type: EdgeType, sym: ts.Symbol | null) => void,
+    pushEdge: PushEdgeFn
   ): void {
     const visit = (n: ts.Node) => {
       if (n !== node) {
         // Nested named function declarations rebind the container.
-        if (ts.isFunctionDeclaration(n)) return;
+        if (ts.isFunctionDeclaration(n)) {
+          return;
+        }
         // Name-bound arrows/func-expressions are separate containers (or skipped
         // fields/accessors). Anonymous inline callbacks fall through and recurse.
-        if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && this.isNameBound(n)) return;
-        // Accessors and property/field initializers: tools disagree — skip.
-        if (ts.isGetAccessor(n) || ts.isSetAccessor(n) || ts.isPropertyDeclaration(n)) return;
-        if (ts.isClassDeclaration(n) || ts.isInterfaceDeclaration(n)) return;
+        if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && this.isNameBound(n)) {
+          return;
+        }
+        // Nested accessors/property initialisers are their own containers,
+        // visited directly by the caller (F5) — don't double-attribute here.
+        if (ts.isGetAccessor(n) || ts.isSetAccessor(n) || ts.isPropertyDeclaration(n)) {
+          return;
+        }
+        if (ts.isClassDeclaration(n) || ts.isInterfaceDeclaration(n)) {
+          return;
+        }
       }
 
       if (ts.isCallExpression(n) || ts.isNewExpression(n)) {
         const calleeName = this.getCalleeName(n);
         if (calleeName) {
-          const symbol = this.getCalleeSymbolSafe(checker, n);
-          pushEdge(containerLocalId, calleeName, 'CALLS', symbol);
+          // F10: cascade of resolution strategies; union-typed receivers can
+          // resolve to more than one in-repo declaration.
+          const { symbols, tier } = resolveCalleeSymbols(checker, n);
+          if (symbols.length > 0) {
+            for (const sym of symbols) {
+              pushEdge(containerLocalId, calleeName, 'CALLS', sym, tier);
+            }
+          } else {
+            pushEdge(containerLocalId, calleeName, 'CALLS', null, tier);
+          }
         }
       }
       ts.forEachChild(n, visit);
@@ -509,7 +790,7 @@ export class TsTypeCheckerOracle {
     sourceFile: ts.SourceFile,
     checker: ts.TypeChecker,
     relPath: string,
-    pushEdge: (from: string, name: string, type: EdgeType, sym: ts.Symbol | null) => void,
+    pushEdge: PushEdgeFn
   ): void {
     for (const st of sourceFile.statements) {
       if (
@@ -533,16 +814,19 @@ export class TsTypeCheckerOracle {
     node: ts.Node,
     checker: ts.TypeChecker,
     containerLocalId: string,
-    pushEdge: (from: string, name: string, type: EdgeType, sym: ts.Symbol | null) => void,
+    pushEdge: PushEdgeFn
   ) {
     const visit = (n: ts.Node) => {
-      if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) {
-        if (n !== node) return;
+      if (
+        (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) &&
+        n !== node
+      ) {
+        return;
       }
 
       if (ts.isPropertyAccessExpression(n) && !ts.isCallExpression(n.parent)) {
         const propName = n.name.text;
-        const symbol = checker.getSymbolAtLocation(n);
+        const symbol = checker.getSymbolAtLocation(n) ?? null;
         pushEdge(containerLocalId, propName, 'ACCESSES', symbol);
       }
       ts.forEachChild(n, visit);
@@ -550,17 +834,82 @@ export class TsTypeCheckerOracle {
     visit(node);
   }
 
+  /**
+   * F4: walk a container body and extract `as`/`satisfies` casts as USES_TYPE
+   * edges — a cast is a type reference just as much as an annotation is.
+   */
+  private visitTypeCasts(
+    node: ts.Node,
+    checker: ts.TypeChecker,
+    containerLocalId: string,
+    pushEdge: PushEdgeFn
+  ): void {
+    const visit = (n: ts.Node) => {
+      if (
+        (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) &&
+        n !== node
+      ) {
+        return;
+      }
+      if (ts.isAsExpression(n) || ts.isSatisfiesExpression(n)) {
+        this.extractTypeUsage(n.type, checker, containerLocalId, pushEdge);
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(node);
+  }
+
+  /**
+   * F4: USES_TYPE for a signature's parameters, return type, and type-parameter
+   * constraints/defaults. Shared by class methods/constructors/accessors,
+   * interface method signatures, function declarations and function
+   * expressions/arrows — anything shaped like `ts.SignatureDeclarationBase`.
+   */
+  private extractSignatureTypeUsage(
+    sig: ts.SignatureDeclarationBase,
+    checker: ts.TypeChecker,
+    containerLocalId: string,
+    pushEdge: PushEdgeFn
+  ): void {
+    for (const param of sig.parameters) {
+      if (param.type) {
+        this.extractTypeUsage(param.type, checker, containerLocalId, pushEdge);
+      }
+    }
+    if (sig.type) {
+      this.extractTypeUsage(sig.type, checker, containerLocalId, pushEdge);
+    }
+    this.extractTypeParameterUsage(sig.typeParameters, checker, containerLocalId, pushEdge);
+  }
+
+  /** F4: USES_TYPE for generic constraints/defaults (`class Foo<T extends Bar>`). */
+  private extractTypeParameterUsage(
+    typeParams: ts.NodeArray<ts.TypeParameterDeclaration> | undefined,
+    checker: ts.TypeChecker,
+    containerLocalId: string,
+    pushEdge: PushEdgeFn
+  ): void {
+    for (const tp of typeParams ?? []) {
+      if (tp.constraint) {
+        this.extractTypeUsage(tp.constraint, checker, containerLocalId, pushEdge);
+      }
+      if (tp.default) {
+        this.extractTypeUsage(tp.default, checker, containerLocalId, pushEdge);
+      }
+    }
+  }
+
   /** Extract type usage from a TypeNode (USES_TYPE edges). */
   private extractTypeUsage(
     typeNode: ts.TypeNode,
     checker: ts.TypeChecker,
     fromLocalId: string,
-    pushEdge: (from: string, name: string, type: EdgeType, sym: ts.Symbol | null) => void,
+    pushEdge: PushEdgeFn
   ) {
     const visit = (n: ts.Node) => {
       if (ts.isTypeReferenceNode(n) && ts.isIdentifier(n.typeName)) {
         const typeName = n.typeName.text;
-        const symbol = checker.getSymbolAtLocation(n.typeName);
+        const symbol = checker.getSymbolAtLocation(n.typeName) ?? null;
         pushEdge(fromLocalId, typeName, 'USES_TYPE', symbol);
       }
       ts.forEachChild(n, visit);
@@ -568,45 +917,141 @@ export class TsTypeCheckerOracle {
     visit(typeNode);
   }
 
+  /**
+   * F7: does `methodName` override a method of the same name declared on an
+   * ancestor? `baseType.getProperty(name)` already resolves through the full
+   * inheritance chain — if the immediate base doesn't declare `name` itself,
+   * it returns the symbol from whichever ancestor actually does, which is
+   * exactly "nearest ancestor declaring the same name".
+   */
+  private emitOverrideIfAny(
+    baseType: ts.Type,
+    methodName: string,
+    fromLocalId: string,
+    repoPath: string,
+    checker: ts.TypeChecker,
+    pushEdge: PushEdgeFn
+  ): void {
+    let baseProp: ts.Symbol | undefined;
+    try {
+      baseProp = baseType.getProperty(methodName);
+    } catch {
+      return;
+    }
+    if (!baseProp) {
+      return;
+    }
+    const loc = resolveSymbolLocation(checker, baseProp, repoPath);
+    if (loc && loc.localId === fromLocalId) {
+      return; // resolved back to itself — not a real override
+    }
+    pushEdge(fromLocalId, methodName, 'METHOD_OVERRIDES', baseProp);
+  }
+
+  /**
+   * F8: does `methodName` satisfy a member of an implemented interface? This
+   * is the member-level companion to the oracle's existing class-level
+   * IMPLEMENTS edge (heritage clause only) — scored in a separate table by
+   * `d2-fidelity.scorer.ts` so tools aren't penalised for not modelling it.
+   */
+  private emitMemberImplementsIfAny(
+    interfaceType: ts.Type,
+    methodName: string,
+    fromLocalId: string,
+    checker: ts.TypeChecker,
+    pushEdge: PushEdgeFn
+  ): void {
+    let prop: ts.Symbol | undefined;
+    try {
+      prop = interfaceType.getProperty(methodName);
+    } catch {
+      return;
+    }
+    if (!prop) {
+      return;
+    }
+    pushEdge(fromLocalId, methodName, 'IMPLEMENTS', prop);
+  }
+
   /** Get the callee name from a CallExpression (for name-based matching fallback). */
   private getCalleeName(node: ts.CallExpression | ts.NewExpression): string | null {
     const expr = node.expression;
-    if (ts.isIdentifier(expr)) return expr.text;
-    if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
-    return null;
-  }
-
-  /** Safe wrapper around getCalleeSymbol that catches errors. */
-  private getCalleeSymbolSafe(checker: ts.TypeChecker, node: ts.CallExpression | ts.NewExpression): ts.Symbol | null {
-    try {
-      if (ts.isNewExpression(node)) {
-        return checker.getSymbolAtLocation(node.expression);
-      }
-      return checker.getSymbolAtLocation(node.expression);
-    } catch {
-      return null;
+    if (ts.isIdentifier(expr)) {
+      return expr.text;
     }
+    if (ts.isPropertyAccessExpression(expr)) {
+      return expr.name.text;
+    }
+    return null;
   }
 }
 
+/**
+ * F9 — normalize `scoreable` for edge types where "no resolved target" means
+ * something definite: after F10's exhaustive call-resolution cascade and
+ * F12's heritage fallback, a CALLS/IMPORTS/EXT***REMOVED***S/IMPLEMENTS edge still
+ * lacking a `targetLocalId` is either pointing outside the repo (external
+ * package, builtin) or is genuinely unresolvable even to the type checker —
+ * either way, no tool built from this repo's source can ever win it, so it
+ * must not sit in a recall denominator (see F9 in
+ * CODE_GRAPH_EVAL_FAIRNESS_PLAN.md). Left as a post-processing pass (not
+ * baked into every `pushEdge` call site) so it applies uniformly to both a
+ * fresh analysis and a cached JSONL from before this field existed, without
+ * requiring the expensive type-check to re-run. Doesn't touch edges that
+ * already carry an explicit `scoreable` (e.g. F12's `[expr]` heritage case),
+ * and doesn't touch edge types (USES_TYPE, ACCESSES, METHOD_OVERRIDES) whose
+ * unresolved-target population wasn't part of this fix.
+ */
+const SCOREABLE_DERIVATION_TYPES: ReadonlySet<EdgeType> = new Set([
+  'CALLS',
+  'IMPORTS',
+  'EXT***REMOVED***S',
+  'IMPLEMENTS',
+]);
+
+export function deriveScoreable(edges: OracleEdge[]): OracleEdge[] {
+  for (const e of edges) {
+    if (e.scoreable === undefined && SCOREABLE_DERIVATION_TYPES.has(e.type)) {
+      e.scoreable = !!e.targetLocalId;
+    }
+  }
+  return edges;
+}
+
 /** Run the type-checker oracle, with caching. */
-export async function runTypeCheckerOracle(opts: TypeCheckerOracleOptions): Promise<TypeCheckerOracleResult> {
+export async function runTypeCheckerOracle(
+  opts: TypeCheckerOracleOptions
+): Promise<TypeCheckerOracleResult> {
   mkdirSync(opts.outDir, { recursive: true });
   const symbolsPath = join(opts.outDir, 'oracle-symbols.jsonl');
   const edgesPath = join(opts.outDir, 'oracle-edges.jsonl');
 
   if (opts.useCache && existsSync(symbolsPath) && existsSync(edgesPath)) {
-    const symbols = readFileSync(symbolsPath, 'utf8').trim().split('\n').filter(Boolean)
+    const symbols = readFileSync(symbolsPath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
       .map((l) => JSON.parse(l) as OracleSymbol);
-    const edges = readFileSync(edgesPath, 'utf8').trim().split('\n').filter(Boolean)
-      .map((l) => JSON.parse(l) as OracleEdge);
+    // F9: derive `scoreable` from the cached JSONL's own `targetLocalId` —
+    // this makes the fairness fix apply to data from before the field
+    // existed, without paying for another 2-5 minute type-check.
+    const edges = deriveScoreable(
+      readFileSync(edgesPath, 'utf8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as OracleEdge)
+    );
     const resolvedCount = edges.filter((e) => e.targetLocalId).length;
-    console.log(`[typechecker-oracle] Cached: ${symbols.length} symbols, ${edges.length} edges (${resolvedCount} resolved)`);
+    console.log(
+      `[typechecker-oracle] Cached: ${symbols.length} symbols, ${edges.length} edges (${resolvedCount} resolved)`
+    );
     return { edges, resolvedCount, symbols, totalEdges: edges.length };
   }
 
   const oracle = new TsTypeCheckerOracle();
   const result = oracle.analyze(opts.repoPath);
+  deriveScoreable(result.edges);
 
   writeFileSync(symbolsPath, result.symbols.map((s) => JSON.stringify(s)).join('\n') + '\n');
   writeFileSync(edgesPath, result.edges.map((e) => JSON.stringify(e)).join('\n') + '\n');

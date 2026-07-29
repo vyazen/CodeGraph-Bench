@@ -20,18 +20,18 @@ export interface CapabilityEntry {
 }
 
 export interface D4Report {
-  /** Ontology coverage — which symbol kinds each tool emits. */
-  ontologyCoverage: Array<{
-    tools: Record<string, 'yes' | 'no'>;
-    kind: SymbolType;
-  }>;
+  /** Capability matrix — features beyond the basic ontology. */
+  capabilityMatrix: CapabilityEntry[];
   /** Edge-type coverage — which semantic edges each tool emits. */
   edgeTypeCoverage: Array<{
     tools: Record<string, 'yes' | 'no'>;
     type: EdgeType;
   }>;
-  /** Capability matrix — features beyond the basic ontology. */
-  capabilityMatrix: CapabilityEntry[];
+  /** Ontology coverage — which symbol kinds each tool emits. */
+  ontologyCoverage: Array<{
+    tools: Record<string, 'yes' | 'no'>;
+    kind: SymbolType;
+  }>;
 }
 
 /**
@@ -44,28 +44,32 @@ export interface D4Report {
 export function scoreD4(
   observedKinds: Record<string, Set<SymbolType>>,
   observedEdgeTypes: Record<string, Set<EdgeType>>,
-  toolNames: string[],
+  toolNames: string[]
 ): D4Report {
   const allKinds = new Set<SymbolType>();
   for (const set of Object.values(observedKinds)) {
-    for (const k of set) allKinds.add(k);
+    for (const k of set) {
+      allKinds.add(k);
+    }
   }
   const allEdgeTypes = new Set<EdgeType>();
   for (const set of Object.values(observedEdgeTypes)) {
-    for (const t of set) allEdgeTypes.add(t);
+    for (const t of set) {
+      allEdgeTypes.add(t);
+    }
   }
 
   const ontologyCoverage = [...allKinds].map((kind) => ({
     kind,
     tools: Object.fromEntries(
-      toolNames.map((t) => [t, (observedKinds[t]?.has(kind) ? 'yes' : 'no') as 'yes' | 'no']),
+      toolNames.map((t) => [t, (observedKinds[t]?.has(kind) ? 'yes' : 'no') as 'yes' | 'no'])
     ),
   }));
 
   const edgeTypeCoverage = [...allEdgeTypes].map((type) => ({
     type,
     tools: Object.fromEntries(
-      toolNames.map((t) => [t, (observedEdgeTypes[t]?.has(type) ? 'yes' : 'no') as 'yes' | 'no']),
+      toolNames.map((t) => [t, (observedEdgeTypes[t]?.has(type) ? 'yes' : 'no') as 'yes' | 'no'])
     ),
   }));
 
@@ -73,51 +77,71 @@ export function scoreD4(
   const capabilityMatrix: CapabilityEntry[] = [
     {
       capability: 'Compiler/type-aware edge resolution (resolved=true)',
-      tools: { GitNexus: 'no', Graphify: 'no', Vyazen: 'yes' },
+      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'no', Vyazen: 'yes' },
     },
     {
       capability: 'resolutionKind slice (compiler-symbol vs receiver-type)',
-      tools: { GitNexus: 'no', Graphify: 'no', Vyazen: 'yes' },
+      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'no', Vyazen: 'yes' },
     },
     {
       capability: 'USES_TYPE edges (type usage tracking)',
-      tools: { GitNexus: 'no', Graphify: 'no', Vyazen: 'yes' },
+      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'yes', Vyazen: 'yes' },
     },
     {
       capability: 'Leiden community clustering',
-      tools: { GitNexus: 'yes', Graphify: 'yes', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'yes', Potpie: 'no', Vyazen: 'no' },
     },
     {
       capability: 'Process tracing (execution flow nodes)',
-      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'no', Vyazen: 'no' },
     },
     {
       capability: 'BM25 + semantic hybrid search',
-      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'yes', Vyazen: 'no' },
     },
     {
       capability: 'Code embeddings (vector search)',
-      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'yes' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'yes', Vyazen: 'yes' },
     },
     {
       capability: 'Incremental re-indexing',
-      tools: { GitNexus: 'yes', Graphify: 'yes', Vyazen: 'yes' },
+      tools: { GitNexus: 'yes', Graphify: 'yes', Potpie: 'no', Vyazen: 'yes' },
     },
     {
       capability: 'Blast-radius / impact analysis',
-      tools: { GitNexus: 'yes', Graphify: 'yes', Vyazen: 'yes' },
+      tools: { GitNexus: 'yes', Graphify: 'yes', Potpie: 'yes', Vyazen: 'yes' },
     },
     {
       capability: 'METHOD_OVERRIDES edges',
-      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'no', Vyazen: 'no' },
     },
     {
       capability: 'ACCESSES edges (property access tracking)',
-      tools: { GitNexus: 'yes', Graphify: 'no', Vyazen: 'no' },
+      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'no', Vyazen: 'no' },
     },
     {
       capability: 'Generic identifier/property reference edges (references, not scored)',
-      tools: { GitNexus: 'no', Graphify: 'yes', Vyazen: 'no' },
+      tools: { GitNexus: 'no', Graphify: 'yes', Potpie: 'no', Vyazen: 'no' },
+    },
+    {
+      capability: 'Emits call edges for TS at all',
+      tools: { GitNexus: 'yes', Graphify: 'yes', Potpie: 'no', Vyazen: 'yes' },
+    },
+    {
+      capability: 'Symbol kinds beyond FILE/CLASS/INTERFACE/FUNCTION',
+      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'no', Vyazen: 'yes' },
+    },
+    {
+      capability: 'Qdrant hybrid dense+BM25+ColBERT search',
+      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'yes', Vyazen: 'no' },
+    },
+    {
+      capability: 'Temporal claim graph (valid_at/invalid_at)',
+      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'yes', Vyazen: 'no' },
+    },
+    {
+      capability: 'LLM docstring/inference layer (not scored)',
+      tools: { GitNexus: 'no', Graphify: 'yes', Potpie: 'yes', Vyazen: 'no' },
     },
   ];
 

@@ -105,9 +105,9 @@ export interface ToolGraph {
 
 export interface ToolMeta {
   commitSha?: string;
+  edgeCount: number;
   name: string;
   nodeCount: number;
-  edgeCount: number;
   version: string;
 }
 
@@ -125,21 +125,44 @@ export interface OracleSymbol {
 export interface OracleEdge {
   /** For CALLS: caller localId; for IMPORTS: file path; for EXT***REMOVED***S/IMPLEMENTS: child localId. */
   fromLocalId: string;
-  /** For CALLS/IMPORTS/EXT***REMOVED***S/IMPLEMENTS: the target name (callee, imported symbol, base class/interface). */
-  targetName: string;
-  type: EdgeType;
+  /**
+   * File the from-side symbol is declared in. Required to disambiguate
+   * `fromLocalId`s that recur across files (e.g. `_Registered`, `useStyles`) —
+   * see F11 in CODE_GRAPH_EVAL_FAIRNESS_PLAN.md. For IMPORTS this equals
+   * `fromLocalId` (both are the importing file's path).
+   */
+  fromPath: string;
+  /** Which resolution tier confirmed the target (F10) — for reporting oracle-certain vs best-effort ground truth. */
+  resolutionTier?: 'symbol' | 'signature' | 'property' | 'optional-chain-stripped' | 'unresolved';
+  /**
+   * False when the target is knowably outside the repo (external package,
+   * builtin, or — post name-resolution-fallback — still unresolved after every
+   * tier tried). Excluded from the scoreable recall denominator (F9). Absent
+   * (undefined) is treated as scoreable=true for edges minted before this field
+   * existed.
+   */
+  scoreable?: boolean;
+  /**
+   * How many source call/reference sites collapsed into this one deduplicated
+   * oracle edge (F9). A tool that emits one edge per unique (from, target) pair
+   * — rather than one per call site — is not penalized for site-count.
+   */
+  siteCount?: number;
   /** Type-checker-resolved target (if the oracle could resolve it). Enables target-accuracy scoring. */
   targetLocalId?: string;
+  /** For CALLS/IMPORTS/EXT***REMOVED***S/IMPLEMENTS: the target name (callee, imported symbol, base class/interface). */
+  targetName: string;
   targetPath?: string;
   targetStartLine?: number;
+  type: EdgeType;
 }
 
 export interface OracleFileResult {
+  extendsRels: Array<{ childLocalId: string; baseName: string }>;
   implementsRels: Array<{ childLocalId: string; baseName: string }>;
   imports: Array<{ fromModule: string | null; targetName: string }>;
   path: string;
   symbols: OracleSymbol[];
-  extendsRels: Array<{ childLocalId: string; baseName: string }>;
 }
 
 // ── Ontology mappings per tool ────────────────────────────────────────────────
@@ -286,4 +309,55 @@ export function normalizeGraphifyEdgeType(relation: string): EdgeType {
     cites: 'UNKNOWN',
   };
   return map[relation] ?? 'UNKNOWN';
+}
+
+/**
+ * Potpie `node_type` (+ `class_name`/`name`) → SymbolType.
+ *
+ * Per POTPIE_EVAL_PLAN.md §4: the payload's `class_name` field (present only on
+ * FUNCTION nodes that belong to a class) makes Method/Function/Constructor
+ * separation exact, unlike Graphify's structural guessing. No `Unknown` bucket
+ * is needed — every Potpie node is classifiable; what's missing (Property,
+ * GlobalVariable, Enum, Alias, Namespace, Module — §3 fact 5) is simply absent
+ * from the payload, and shows up as recall, not as a kind to normalize away.
+ */
+export function normalizePotpieKind(
+  nodeType: string,
+  className: string | null | undefined,
+  name: string
+): SymbolType {
+  switch (nodeType) {
+    case 'FILE':
+      return 'File';
+    case 'CLASS':
+      return 'Class';
+    case 'INTERFACE':
+      return 'Interface';
+    case 'FUNCTION':
+      if (className) {
+        return name === 'constructor' ? 'Constructor' : 'Method';
+      }
+      return 'Function';
+    default:
+      return 'Unknown';
+  }
+}
+
+/**
+ * Potpie `relationship_type` → EdgeType.
+ *
+ * `CONTAINS` is emitted for diagnostics (parentId derivation) but sits outside
+ * the head-to-head (not in COMPARABLE_EDGE_TYPES/EXT***REMOVED***ED_EDGE_TYPES).
+ * `REFERENCES` → `USES_TYPE`, scored in the extended-edge table — per
+ * POTPIE_EVAL_PLAN.md §4, this is a measurement of what the relation is built
+ * from (type annotations + `new` expressions), not a charitable mapping to
+ * CALLS. Potpie emits no CALLS/IMPORTS/EXT***REMOVED***S/IMPLEMENTS for TS by
+ * construction (§3 fact 1-3) — there is no raw relation to map to them.
+ */
+export function normalizePotpieEdgeType(relationshipType: string): EdgeType {
+  const map: Record<string, EdgeType> = {
+    CONTAINS: 'CONTAINS',
+    REFERENCES: 'USES_TYPE',
+  };
+  return map[relationshipType] ?? 'UNKNOWN';
 }
