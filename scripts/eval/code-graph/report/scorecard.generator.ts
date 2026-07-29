@@ -98,23 +98,24 @@ function fmtGranularityAware(cell: string, onlyFileGranularity: boolean | undefi
 }
 
 /**
- * F13 — "publish the ceiling next to every recall figure": recall is already
- * computed over the scoreable-only denominator (F9), so it can't be improved
- * by fixing the oracle further. The ceiling answers a different question —
- * "what's the most any tool could ever score against the RAW oracle count
- * for this type, before F9 excluded the unscoreable rows?" — which is what
- * lets a reader judge how much of the gap to a hypothetical 100% is real vs.
- * an artifact of an oracle row nothing built from this repo could ever name.
+ * F13 asked for "the ceiling published next to every recall figure". That was
+ * written against the pre-F9 harness, where unwinnable oracle rows sat IN the
+ * recall denominator and a reader genuinely needed to know how much of the gap
+ * to 100% was unreachable. F9 removed those rows from the denominator instead,
+ * which is the stronger fix — so a "ceiling" of `(tp+fn)/(tp+fn+unscoreable)`
+ * now measures something else entirely (the scoreable *share of the raw oracle
+ * count*) and, printed beside recall, actively misleads: it renders cells like
+ * `96.7% (ceiling 76.1%)`, and it contradicts the harness's own soundness
+ * invariant — `fairness.spec.ts` asserts a PerfectTool scores exactly 100%
+ * recall on this denominator, so the true ceiling is always 100%.
+ *
+ * The information F13 wanted is still in the report, unmangled: every edge
+ * table carries an `Unscoreable (excl.)` column with the raw excluded count,
+ * documented in the column key and the `Unscoreable (excluded)` glossary row.
+ * So recall prints as recall.
  */
-function fmtRecallWithCeiling(m: { fn: number; tp: number; unscoreableExcluded?: number }): string {
-  const recall = fmtRecall(m);
-  const unscoreable = m.unscoreableExcluded ?? 0;
-  if (recall.startsWith('n/a') || unscoreable === 0) {
-    return recall;
-  }
-  const rawTotal = m.tp + m.fn + unscoreable;
-  const ceiling = rawTotal === 0 ? 0 : (m.tp + m.fn) / rawTotal;
-  return `${recall} (ceiling ${pct(ceiling)})`;
+function fmtRecallOnScoreable(m: { fn: number; tp: number }): string {
+  return fmtRecall(m);
 }
 function fmtKindLabelAccuracy(kl: { correct: number; mislabelled: number; total: number }): string {
   if (kl.total === 0) {
@@ -361,7 +362,7 @@ export function generateScorecard(input: ScorecardInput): string {
         continue;
       }
       lines.push(
-        `| ${type} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtGranularityAware(fmtPrecision(m), m.onlyFileGranularity)} | ${fmtGranularityAware(fmtRecallWithCeiling(m), m.onlyFileGranularity)} | ${fmtGranularityAware(fmtF1(m), m.onlyFileGranularity)} | ${num(m.targetConfirmed)} | ${num(m.nameOnlyConfirmed)} | ${pct(m.targetAccuracy)} | ${num(m.unscoreableExcluded)} | ${pct(m.siteCoverage)} |`
+        `| ${type} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtGranularityAware(fmtPrecision(m), m.onlyFileGranularity)} | ${fmtGranularityAware(fmtRecallOnScoreable(m), m.onlyFileGranularity)} | ${fmtGranularityAware(fmtF1(m), m.onlyFileGranularity)} | ${num(m.targetConfirmed)} | ${num(m.nameOnlyConfirmed)} | ${pct(m.targetAccuracy)} | ${num(m.unscoreableExcluded)} | ${pct(m.siteCoverage)} |`
       );
     }
     lines.push(
@@ -472,7 +473,7 @@ export function generateScorecard(input: ScorecardInput): string {
     );
     for (const m of d1.perType) {
       lines.push(
-        `| ${m.edgeType} | ${num(m.toolClaimed)} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecallWithCeiling(m)} | ${num(m.targetConfirmed)} | ${num(m.unscoreableExcluded)} | ${pct(m.siteCoverage)} |`
+        `| ${m.edgeType} | ${num(m.toolClaimed)} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecallOnScoreable(m)} | ${num(m.targetConfirmed)} | ${num(m.unscoreableExcluded)} | ${pct(m.siteCoverage)} |`
       );
     }
     lines.push('');
@@ -567,7 +568,7 @@ export function generateScorecard(input: ScorecardInput): string {
       // header ("evaluated on the accuracy of what it emits") by printing a
       // fabricated zero for types a tool simply doesn't produce.
       lines.push(
-        `| ${type} | ${name} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecallWithCeiling(m)} | ${fmtF1(m)} | ${num(m.unscoreableExcluded)} | ${pct(m.siteCoverage)} |`
+        `| ${type} | ${name} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecallOnScoreable(m)} | ${fmtF1(m)} | ${num(m.unscoreableExcluded)} | ${pct(m.siteCoverage)} |`
       );
     }
   }
