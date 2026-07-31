@@ -19,9 +19,15 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import ts from 'typescript';
 import type { EdgeType, OracleEdge, OracleSymbol, SymbolType } from '../types';
+import {
+  assignFileOwnership,
+  discoverProjects,
+  type OracleProject,
+  walkRepoFiles,
+} from './project-discovery';
 
 export interface TypeCheckerOracleResult {
   edges: OracleEdge[];
@@ -292,71 +298,188 @@ function resolveCalleeSymbols(
   return { symbols: [], tier: 'unresolved' };
 }
 
-export class TsTypeCheckerOracle {
-  analyze(repoPath: string): TypeCheckerOracleResult {
-    // 1. Find and parse tsconfig.json
-    const configPath = ts.findConfigFile(repoPath, ts.sys.fileExists, 'tsconfig.json');
-    if (!configPath) {
-      throw new Error('No tsconfig.json found');
-    }
-    const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
-    if (configFile.error) {
-      throw new Error(`tsconfig parse error: ${configFile.error.messageText}`);
-    }
-    const parsedConfig = ts.parseJsonConfigFileContent(configFile.config, ts.sys, repoPath);
+/** Extensions the compiler can actually parse as a root file (matches `allowJs` fallback options). */
+const SOURCE_EXT_RE = /\.(tsx?|jsx?|mts|cts|mjs|cjs)$/;
 
-    console.log(
-      `[typechecker-oracle] Creating TS Program with ${parsedConfig.fileNames.length} files...`
+/**
+ * Fails loudly if the same file is walked by more than one project — the
+ * failure mode the ownership rule (§1.2) exists to prevent, since a
+ * double-walked file would emit its symbols/edges twice and corrupt every
+ * downstream ratio. Deliberately file-scoped, not `(path, localId)`-scoped:
+ * a single file can legitimately emit the same localId more than once (e.g.
+ * overload signatures all named `combine`), which is pre-existing, unrelated
+ * behavior this refactor must not start rejecting.
+ */
+function assertFilesOwnedOnce(ownedFiles: readonly string[], seenFiles: Set<string>): void {
+  for (const f of ownedFiles) {
+    if (seenFiles.has(f)) {
+      throw new Error(`[typechecker-oracle] file walked by more than one project: ${f}`);
+    }
+    seenFiles.add(f);
+  }
+}
+
+/**
+ * Mirrors `the type-checker oracle`'s `loadCompilerOptions`
+ * exactly, including all three fallback paths (VSCODE_CODE_GRAPH_EVAL_PLAN.md
+ * §1.2): no tsconfig, tsconfig read/parse error, and tsconfig OK but with an
+ * empty `fileNames` list. A project with no tsconfig is still analyzed — never
+ * skipped — using its own owned files as the root file list.
+ */
+function loadCompilerOptionsForProject(
+  repoPath: string,
+  tsconfigPath: string | null,
+  ownedFilePaths: readonly string[]
+): { options: ts.CompilerOptions; rootNames: string[] } {
+  const absoluteFilePaths = ownedFilePaths
+    .filter((f) => SOURCE_EXT_RE.test(f))
+    .map((f) => join(repoPath, f));
+
+  const fallbackOptions: ts.CompilerOptions = {
+    allowJs: true,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    target: ts.ScriptTarget.ESNext,
+    noEmit: true,
+    skipLibCheck: true,
+  };
+
+  if (!tsconfigPath) {
+    return { options: fallbackOptions, rootNames: absoluteFilePaths };
+  }
+
+  const absoluteTsconfigPath = join(repoPath, tsconfigPath);
+
+  try {
+    const readResult = ts.readConfigFile(absoluteTsconfigPath, ts.sys.readFile);
+    if (readResult.error) {
+      console.warn(
+        `[typechecker-oracle] tsconfig error in ${tsconfigPath} — falling back to inferred config`
+      );
+      return { options: fallbackOptions, rootNames: absoluteFilePaths };
+    }
+
+    const configDir = dirname(absoluteTsconfigPath);
+    const parsedConfig = ts.parseJsonConfigFileContent(
+      readResult.config,
+      ts.sys,
+      configDir,
+      undefined,
+      absoluteTsconfigPath
     );
 
-    // 2. Create Program (with skipLibCheck for speed, noEmit since we only read)
-    const program = ts.createProgram({
-      rootNames: parsedConfig.fileNames,
-      options: {
-        ...parsedConfig.options,
-        noEmit: true,
-        skipLibCheck: true,
-        declaration: false,
-        sourceMap: false,
-      },
-    });
+    const rootNames =
+      parsedConfig.fileNames.length > 0 ? parsedConfig.fileNames : absoluteFilePaths;
 
-    console.log('[typechecker-oracle] Program created. Getting type checker...');
-    const checker = program.getTypeChecker();
+    return {
+      options: { ...parsedConfig.options, noEmit: true, skipLibCheck: true },
+      rootNames,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[typechecker-oracle] failed to load tsconfig ${tsconfigPath} — ${message}. Falling back to inferred config.`
+    );
+    return { options: fallbackOptions, rootNames: absoluteFilePaths };
+  }
+}
 
-    // 3. Walk each source file
-    const symbols: OracleSymbol[] = [];
-    const edges: OracleEdge[] = [];
-    let resolvedCount = 0;
+export interface ProjectAnalysisResult {
+  edges: OracleEdge[];
+  ownedFiles: string[];
+  project: OracleProject;
+  resolvedCount: number;
+  symbols: OracleSymbol[];
+}
 
-    // F3: `.d.ts` files are indexed too (policy (a) — the alternative is
-    // excluding them from every tool's node set as well, which would throw
-    // away real symbols tools do extract). `getRelPath` still excludes
-    // node_modules and anything outside the repo.
-    const sourceFiles = program
-      .getSourceFiles()
-      .filter((sf) => getRelPath(repoPath, sf.fileName) !== null);
-    console.log(`[typechecker-oracle] Analyzing ${sourceFiles.length} source files...`);
+export class TsTypeCheckerOracle {
+  /**
+   * Discovers project boundaries, assigns each file to exactly one owning
+   * project (§1.2), and analyzes each project's own `ts.Program` in turn.
+   * Sequential by design (§1.4): each program/checker goes out of scope
+   * before the next is built, so peak RSS doesn't multiply across projects.
+   */
+  analyzeByProject(repoPath: string): ProjectAnalysisResult[] {
+    const files = walkRepoFiles(repoPath);
+    const projects = discoverProjects(files);
+    const ownership = assignFileOwnership(projects, files);
 
-    let fileNum = 0;
-    for (const sourceFile of sourceFiles) {
-      const relPath = getRelPath(repoPath, sourceFile.fileName)!;
-      fileNum++;
-      if (fileNum % 500 === 0) {
-        console.log(`[typechecker-oracle]   ${fileNum}/${sourceFiles.length} files...`);
+    console.log(`[typechecker-oracle] Discovered ${projects.length} project(s)`);
+
+    const seen = new Set<string>();
+    const results: ProjectAnalysisResult[] = [];
+    let projectNum = 0;
+
+    for (const project of projects) {
+      projectNum++;
+      const ownedFiles = files.filter((f) => ownership.get(f) === project);
+      if (ownedFiles.length === 0) {
+        continue;
       }
 
-      const result = this.analyzeFile(sourceFile, checker, repoPath, relPath);
-      symbols.push(...result.symbols);
-      edges.push(...result.edges);
-      resolvedCount += result.resolvedCount;
+      assertFilesOwnedOnce(ownedFiles, seen);
+      const start = Date.now();
+      const { edges, resolvedCount, symbols } = this.analyzeProject(repoPath, project, ownedFiles);
+
+      console.log(
+        `[typechecker-oracle] Project ${projectNum}/${projects.length} (${project.rootPath}): ` +
+          `${ownedFiles.length} files, ${symbols.length} symbols, ${edges.length} edges, ${Date.now() - start}ms`
+      );
+
+      results.push({ edges, ownedFiles, project, resolvedCount, symbols });
     }
+
+    return results;
+  }
+
+  /** Convenience wrapper over `analyzeByProject` for callers that just want the combined result. */
+  analyze(repoPath: string): TypeCheckerOracleResult {
+    const perProject = this.analyzeByProject(repoPath);
+    const symbols = perProject.flatMap((r) => r.symbols);
+    const edges = perProject.flatMap((r) => r.edges);
+    const resolvedCount = perProject.reduce((sum, r) => sum + r.resolvedCount, 0);
 
     console.log(
       `[typechecker-oracle] Done: ${symbols.length} symbols, ${edges.length} edges (${resolvedCount} resolved)`
     );
 
     return { edges, resolvedCount, symbols, totalEdges: edges.length };
+  }
+
+  /** Builds one project's `ts.Program` and walks only the files it owns. */
+  analyzeProject(
+    repoPath: string,
+    project: OracleProject,
+    ownedFiles: readonly string[]
+  ): { edges: OracleEdge[]; resolvedCount: number; symbols: OracleSymbol[] } {
+    const { options, rootNames } = loadCompilerOptionsForProject(
+      repoPath,
+      project.tsconfigPath,
+      ownedFiles
+    );
+
+    const program = ts.createProgram({ rootNames, options });
+    const checker = program.getTypeChecker();
+
+    const symbols: OracleSymbol[] = [];
+    const edges: OracleEdge[] = [];
+    let resolvedCount = 0;
+
+    // F3: `.d.ts` files are indexed too (policy (a) — the alternative is
+    // excluding them from every tool's node set as well, which would throw
+    // away real symbols tools do extract).
+    for (const ownedPath of ownedFiles) {
+      const sourceFile = program.getSourceFile(join(repoPath, ownedPath));
+      if (!sourceFile) {
+        continue; // not a file the compiler parses as source (e.g. .json, .md)
+      }
+
+      const result = this.analyzeFile(sourceFile, checker, repoPath, ownedPath);
+      symbols.push(...result.symbols);
+      edges.push(...result.edges);
+      resolvedCount += result.resolvedCount;
+    }
+
+    return { edges, resolvedCount, symbols };
   }
 
   private analyzeFile(
@@ -1018,44 +1141,97 @@ export function deriveScoreable(edges: OracleEdge[]): OracleEdge[] {
   return edges;
 }
 
-/** Run the type-checker oracle, with caching. */
+function readJsonl<T>(path: string): T[] {
+  return readFileSync(path, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as T);
+}
+
+function writeJsonl(path: string, items: readonly unknown[]): void {
+  writeFileSync(path, items.map((i) => JSON.stringify(i)).join('\n') + '\n');
+}
+
+/** Filesystem-safe label for a project's JSONL pair — '.' (root) becomes 'root'. */
+function projectFileSlug(project: OracleProject): string {
+  const slug = project.id.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return slug || 'root';
+}
+
+/**
+ * Run the type-checker oracle, with per-project caching (§1.4). Each
+ * project's symbols/edges persist to their own JSONL pair under
+ * `outDir/projects/` as soon as that project finishes, so an interrupted
+ * multi-hour run resumes from "N done" under `--use-cache` instead of
+ * restarting from project 1. The combined `oracle-symbols.jsonl` /
+ * `oracle-edges.jsonl` at `outDir` are still written at the end, unchanged,
+ * for existing consumers (runner.ts, scorers).
+ */
 export async function runTypeCheckerOracle(
   opts: TypeCheckerOracleOptions
 ): Promise<TypeCheckerOracleResult> {
   mkdirSync(opts.outDir, { recursive: true });
-  const symbolsPath = join(opts.outDir, 'oracle-symbols.jsonl');
-  const edgesPath = join(opts.outDir, 'oracle-edges.jsonl');
+  const projectsDir = join(opts.outDir, 'projects');
+  mkdirSync(projectsDir, { recursive: true });
 
-  if (opts.useCache && existsSync(symbolsPath) && existsSync(edgesPath)) {
-    const symbols = readFileSync(symbolsPath, 'utf8')
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((l) => JSON.parse(l) as OracleSymbol);
-    // F9: derive `scoreable` from the cached JSONL's own `targetLocalId` —
-    // this makes the fairness fix apply to data from before the field
-    // existed, without paying for another 2-5 minute type-check.
-    const edges = deriveScoreable(
-      readFileSync(edgesPath, 'utf8')
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as OracleEdge)
-    );
-    const resolvedCount = edges.filter((e) => e.targetLocalId).length;
-    console.log(
-      `[typechecker-oracle] Cached: ${symbols.length} symbols, ${edges.length} edges (${resolvedCount} resolved)`
-    );
-    return { edges, resolvedCount, symbols, totalEdges: edges.length };
-  }
+  const files = walkRepoFiles(opts.repoPath);
+  const projects = discoverProjects(files);
+  const ownership = assignFileOwnership(projects, files);
+  console.log(`[typechecker-oracle] Discovered ${projects.length} project(s)`);
 
   const oracle = new TsTypeCheckerOracle();
-  const result = oracle.analyze(opts.repoPath);
-  deriveScoreable(result.edges);
+  const seen = new Set<string>();
+  const allSymbols: OracleSymbol[] = [];
+  const allEdges: OracleEdge[] = [];
 
-  writeFileSync(symbolsPath, result.symbols.map((s) => JSON.stringify(s)).join('\n') + '\n');
-  writeFileSync(edgesPath, result.edges.map((e) => JSON.stringify(e)).join('\n') + '\n');
-  console.log(`[typechecker-oracle] Wrote to ${opts.outDir}`);
+  let projectNum = 0;
+  for (const project of projects) {
+    projectNum++;
+    const ownedFiles = files.filter((f) => ownership.get(f) === project);
+    if (ownedFiles.length === 0) {
+      continue;
+    }
+    assertFilesOwnedOnce(ownedFiles, seen);
 
-  return result;
+    const slug = projectFileSlug(project);
+    const symbolsPath = join(projectsDir, `${slug}.symbols.jsonl`);
+    const edgesPath = join(projectsDir, `${slug}.edges.jsonl`);
+
+    let symbols: OracleSymbol[];
+    let edges: OracleEdge[];
+
+    if (opts.useCache && existsSync(symbolsPath) && existsSync(edgesPath)) {
+      symbols = readJsonl<OracleSymbol>(symbolsPath);
+      edges = deriveScoreable(readJsonl<OracleEdge>(edgesPath));
+      console.log(
+        `[typechecker-oracle] Project ${projectNum}/${projects.length} (${project.rootPath}): ` +
+          `cached (${symbols.length} symbols, ${edges.length} edges)`
+      );
+    } else {
+      const start = Date.now();
+      const result = oracle.analyzeProject(opts.repoPath, project, ownedFiles);
+      symbols = result.symbols;
+      edges = deriveScoreable(result.edges);
+      writeJsonl(symbolsPath, symbols);
+      writeJsonl(edgesPath, edges);
+      console.log(
+        `[typechecker-oracle] Project ${projectNum}/${projects.length} (${project.rootPath}): ` +
+          `${ownedFiles.length} files, ${symbols.length} symbols, ${edges.length} edges, ${Date.now() - start}ms`
+      );
+    }
+
+    allSymbols.push(...symbols);
+    allEdges.push(...edges);
+  }
+
+  const resolvedCount = allEdges.filter((e) => e.targetLocalId).length;
+
+  writeJsonl(join(opts.outDir, 'oracle-symbols.jsonl'), allSymbols);
+  writeJsonl(join(opts.outDir, 'oracle-edges.jsonl'), allEdges);
+  console.log(
+    `[typechecker-oracle] Done: ${allSymbols.length} symbols, ${allEdges.length} edges (${resolvedCount} resolved). Wrote to ${opts.outDir}`
+  );
+
+  return { edges: allEdges, resolvedCount, symbols: allSymbols, totalEdges: allEdges.length };
 }
