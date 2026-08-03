@@ -17,7 +17,10 @@ import { describe, expect, it } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { adjudicateEdges } from '../matching/edge-adjudicator';
+import { matchNodes } from '../matching/node-identity.matcher';
 import { deriveScoreable, TsTypeCheckerOracle } from '../oracle/ts-typechecker.oracle';
+import { scoreD1 } from '../scorers/d1-depth.scorer';
 import { scoreD2 } from '../scorers/d2-fidelity.scorer';
 import type { GraphEdge, GraphNode, OracleEdge, OracleSymbol } from '../types';
 
@@ -442,6 +445,67 @@ describe('4. Denominator soundness — PerfectTool scores 100% on every metric',
     expect(usesType?.recall).toBe(1);
     expect(usesType?.f1).toBe(1);
   });
+
+  it('scores METHOD_OVERRIDES from-agnostic P=R=F1=1.0', () => {
+    const overrides = report.edges.methodOverridesFromAgnostic;
+    expect(overrides.precision).toBe(1);
+    expect(overrides.recall).toBe(1);
+    expect(overrides.f1).toBe(1);
+  });
+});
+
+// ── Phase 5, item 2 — METHOD_OVERRIDES from-side attribution mismatch ─────────
+
+describe('Phase 5 — METHOD_OVERRIDES: Class-attributed tool vs Method-attributed oracle', () => {
+  // Mirrors GitNexus's own convention verified against data/gitnexus/edges.jsonl:
+  // fromId is the derived Class, not the overriding Method. The oracle
+  // attributes fromLocalId to the overriding Method. Scored strictly
+  // (extendedByType), this forces 0 TP by construction — the bug this test
+  // guards against regressing.
+  const { symbols, edges } = runOracle({
+    'base.ts': `
+      export class Base {
+        greet(): void {}
+      }
+    `,
+    'derived.ts': `
+      import { Base } from './base';
+      export class Derived extends Base {
+        greet(): void {}
+      }
+    `,
+  });
+
+  const derivedClass = symbols.find((s) => s.name === 'Derived' && s.kind === 'Class');
+  const derivedMethod = symbols.find((s) => s.localId === 'Derived.greet');
+  const baseMethod = symbols.find((s) => s.localId === 'Base.greet');
+  if (!(derivedClass && derivedMethod && baseMethod)) {
+    throw new Error('fixture setup failed to locate expected oracle symbols');
+  }
+
+  const toolNodes: GraphNode[] = [
+    mkToolNode('cls:Derived', 'Derived', derivedClass.path, derivedClass.startLine, 'Class'),
+    mkToolNode('cls:Base', 'Base', baseMethod.path, 1, 'Class'),
+    mkToolNode('m:Derived.greet', 'greet', derivedMethod.path, derivedMethod.startLine, 'Method'),
+    mkToolNode('m:Base.greet', 'greet', baseMethod.path, baseMethod.startLine, 'Method'),
+  ];
+  // Class-attributed, like GitNexus: fromId is the Class, not the Method.
+  const toolEdges: GraphEdge[] = [mkToolEdge('cls:Derived', 'm:Base.greet', 'METHOD_OVERRIDES')];
+
+  const report = scoreD2(toolNodes, toolEdges, symbols, edges);
+
+  it('strict extendedByType scores 0 TP by construction (the pre-fix symptom)', () => {
+    const strict = report.edges.extendedByType.METHOD_OVERRIDES;
+    expect(strict?.tp).toBe(0);
+    expect(strict?.fp).toBe(1);
+  });
+
+  it('from-agnostic scoring confirms the same edge as a true positive', () => {
+    const fromAgnostic = report.edges.methodOverridesFromAgnostic;
+    expect(fromAgnostic.tp).toBe(1);
+    expect(fromAgnostic.fp).toBe(0);
+    expect(fromAgnostic.precision).toBe(1);
+  });
 });
 
 // ── 5. Symmetry audit ──────────────────────────────────────────────────────────
@@ -506,5 +570,386 @@ describe('5. Symmetry audit', () => {
     // And the two graphs are NOT interchangeable (sanity: the test isn't
     // vacuously true because both graphs happen to score the same).
     expect(resultsA.Alpha.nodes.overall.f1).not.toBe(resultsA.Beta.nodes.overall.f1);
+  });
+});
+
+// ── VSCODE_ORACLE_RESOLUTION_FIX_PLAN.md Phase B ──────────────────────────────
+
+// ── F18 — unscoreable oracle rows neutralise a matching tool edge ────────────
+
+describe('F18 — unscoreable oracle rows neutralise a matching tool edge, not fail it', () => {
+  it('routes a tool edge that only matches a scoreable:false oracle row to unscoreableMatched, not FP', () => {
+    const fileNode = mkToolNode('t:file', 'a.ts', 'src/a.ts', null, 'File');
+    const targetNode = mkToolNode('t:uri', 'URI', 'src/uri.ts', 1, 'Class');
+    const toolEdge = mkToolEdge('t:file', 't:uri', 'IMPORTS');
+
+    const oracleEdge: OracleEdge = {
+      fromLocalId: 'src/a.ts',
+      fromPath: 'src/a.ts',
+      scoreable: false,
+      targetName: 'URI',
+      type: 'IMPORTS',
+    };
+
+    const result = adjudicateEdges([toolEdge], [fileNode, targetNode], [oracleEdge], [], []);
+
+    expect(result.falsePositives.length).toBe(0);
+    expect(result.unscoreableMatched.length).toBe(1);
+    expect(result.truePositives.length).toBe(0);
+    expect(result.falseNegatives.length).toBe(0);
+  });
+
+  it('still charges FP when nothing in the unscoreable set matches by name (no over-triggering)', () => {
+    const fileNode = mkToolNode('t:file', 'a.ts', 'src/a.ts', null, 'File');
+    const bogusNode = mkToolNode('t:bogus', 'Bogus', 'src/bogus.ts', 1, 'Class');
+    const toolEdge = mkToolEdge('t:file', 't:bogus', 'IMPORTS');
+
+    // A genuinely scoreable oracle row with a DIFFERENT target — the tool
+    // edge matches neither this row nor anything in the (empty) unscoreable
+    // set, so it must still be a false positive.
+    const oracleEdge: OracleEdge = {
+      fromLocalId: 'src/a.ts',
+      fromPath: 'src/a.ts',
+      scoreable: true,
+      targetLocalId: 'Real',
+      targetName: 'Real',
+      targetPath: 'src/real.ts',
+      targetStartLine: 1,
+      type: 'IMPORTS',
+    };
+
+    const result = adjudicateEdges([toolEdge], [fileNode, bogusNode], [oracleEdge], [], []);
+
+    expect(result.unscoreableMatched.length).toBe(0);
+    expect(result.falsePositives.length).toBe(1);
+  });
+});
+
+// ── F21 — from-side-agnostic scorers match by identity OR by name ────────────
+
+describe('F21 — from-side-agnostic scorers match by identity or by name', () => {
+  it('USES_TYPE agnostic recovers a TP the strict table forces to 0 (misattributed container + unbound target)', () => {
+    const oracleSymbols: OracleSymbol[] = [
+      {
+        endLine: 10,
+        kind: 'Class',
+        localId: 'Container',
+        name: 'Container',
+        parentLocalId: null,
+        path: 'src/a.ts',
+        startLine: 1,
+      },
+      {
+        endLine: 5,
+        kind: 'Method',
+        localId: 'Container.run',
+        name: 'run',
+        parentLocalId: 'Container',
+        path: 'src/a.ts',
+        startLine: 3,
+      },
+      {
+        endLine: 3,
+        kind: 'Class',
+        localId: 'Widget',
+        name: 'Widget',
+        parentLocalId: null,
+        path: 'src/b.ts',
+        startLine: 1,
+      },
+    ];
+    const oracleEdges: OracleEdge[] = [
+      {
+        fromLocalId: 'Container.run',
+        fromPath: 'src/a.ts',
+        targetLocalId: 'Widget',
+        targetName: 'Widget',
+        targetPath: 'src/b.ts',
+        targetStartLine: 1,
+        type: 'USES_TYPE',
+      },
+    ];
+
+    // Tool attributes the reference to the CLASS (misattribution vs the
+    // oracle's Method), and the referenced type resolves through a re-export
+    // at a different path than the oracle's declaration site — so the
+    // to-node never binds to the oracle's `Widget` symbol, even though its
+    // raw name is identical.
+    const containerNode = mkToolNode('t:Container', 'Container', 'src/a.ts', 1, 'Class');
+    const widgetRefNode = mkToolNode('t:widgetRef', 'Widget', 'src/c.ts', 1, 'Class');
+    const toolNodes = [containerNode, widgetRefNode];
+    const toolEdges = [mkToolEdge('t:Container', 't:widgetRef', 'USES_TYPE')];
+
+    const report = scoreD2(toolNodes, toolEdges, oracleSymbols, oracleEdges);
+
+    const strict = report.edges.extendedByType.USES_TYPE;
+    expect(strict?.tp).toBe(0); // ftKey mismatch: tool attributed to 'Container', oracle to 'Container.run'
+
+    const agnostic = report.edges.usesTypeFromAgnostic;
+    expect(agnostic.tp).toBe(1); // recovered by fromPath + target-name matching
+    expect(agnostic.tp).toBeGreaterThanOrEqual(strict?.tp ?? 0);
+  });
+
+  it('METHOD_OVERRIDES agnostic recovers a TP the strict table forces to 0 (misattributed container + unbound target)', () => {
+    const oracleSymbols: OracleSymbol[] = [
+      {
+        endLine: 10,
+        kind: 'Class',
+        localId: 'Derived',
+        name: 'Derived',
+        parentLocalId: null,
+        path: 'src/derived.ts',
+        startLine: 1,
+      },
+      {
+        endLine: 5,
+        kind: 'Method',
+        localId: 'Derived.greet',
+        name: 'greet',
+        parentLocalId: 'Derived',
+        path: 'src/derived.ts',
+        startLine: 3,
+      },
+      {
+        endLine: 5,
+        kind: 'Method',
+        localId: 'Base.greet',
+        name: 'greet',
+        parentLocalId: 'Base',
+        path: 'src/base.ts',
+        startLine: 3,
+      },
+    ];
+    const oracleEdges: OracleEdge[] = [
+      {
+        fromLocalId: 'Derived.greet',
+        fromPath: 'src/derived.ts',
+        targetLocalId: 'Base.greet',
+        targetName: 'greet',
+        targetPath: 'src/base.ts',
+        targetStartLine: 3,
+        type: 'METHOD_OVERRIDES',
+      },
+    ];
+
+    // GitNexus-style: attributes the override to the containing CLASS. The
+    // base method reference resolves through a different path than the
+    // oracle's declaration site, so it never binds — same shape as the
+    // USES_TYPE case above.
+    const derivedClassNode = mkToolNode('cls:Derived', 'Derived', 'src/derived.ts', 1, 'Class');
+    const baseGreetRefNode = mkToolNode(
+      't:baseGreetRef',
+      'greet',
+      'src/base-alias.ts',
+      9,
+      'Method'
+    );
+    const toolNodes = [derivedClassNode, baseGreetRefNode];
+    const toolEdges = [mkToolEdge('cls:Derived', 't:baseGreetRef', 'METHOD_OVERRIDES')];
+
+    const report = scoreD2(toolNodes, toolEdges, oracleSymbols, oracleEdges);
+
+    const strict = report.edges.extendedByType.METHOD_OVERRIDES;
+    expect(strict?.tp).toBe(0);
+
+    const agnostic = report.edges.methodOverridesFromAgnostic;
+    expect(agnostic.tp).toBe(1);
+    expect(agnostic.tp).toBeGreaterThanOrEqual(strict?.tp ?? 0);
+  });
+});
+
+// ── F22 — duplicate rows are collapsed before matching, not scored ───────────
+
+describe('F22 — duplicate rows are collapsed before matching, not scored', () => {
+  it("collapses a tool's exact-duplicate node row instead of charging it as FP", () => {
+    const oracleSymbols: OracleSymbol[] = [
+      {
+        endLine: 5,
+        kind: 'Class',
+        localId: 'Foo',
+        name: 'Foo',
+        parentLocalId: null,
+        path: 'src/a.ts',
+        startLine: 1,
+      },
+    ];
+    const toolNodes = [
+      mkToolNode('t1', 'Foo', 'src/a.ts', 1, 'Class'),
+      mkToolNode('t2', 'Foo', 'src/a.ts', 1, 'Class'), // exact duplicate row
+    ];
+
+    const result = matchNodes(toolNodes, oracleSymbols);
+
+    expect(result.duplicateToolNodesCollapsed).toBe(1);
+    expect(result.matched.length).toBe(1);
+    expect(result.toolUnmatched.length).toBe(0);
+  });
+
+  it("collapses duplicate oracle rows so a kind's tp+fn total is identical regardless of which tool is scored", () => {
+    const dupOracleSymbols: OracleSymbol[] = [
+      {
+        endLine: 5,
+        kind: 'Class',
+        localId: 'Foo',
+        name: 'Foo',
+        parentLocalId: null,
+        path: 'src/a.ts',
+        startLine: 1,
+      },
+      // Duplicate oracle row — same (path, localId), simulating a data glitch.
+      {
+        endLine: 5,
+        kind: 'Class',
+        localId: 'Foo',
+        name: 'Foo',
+        parentLocalId: null,
+        path: 'src/a.ts',
+        startLine: 1,
+      },
+    ];
+    const toolThatMatches = [mkToolNode('t1', 'Foo', 'src/a.ts', 1, 'Class')];
+    const toolThatMisses: GraphNode[] = [];
+
+    const resultMatch = matchNodes(toolThatMatches, dupOracleSymbols);
+    const resultMiss = matchNodes(toolThatMisses, dupOracleSymbols);
+
+    expect(resultMatch.oracleUnmatched.length).toBe(0);
+    expect(resultMiss.oracleUnmatched.length).toBe(1); // deduped to one row, not two
+
+    const tpPlusFn = (r: typeof resultMatch) => r.matched.length + r.oracleUnmatched.length;
+    expect(tpPlusFn(resultMatch)).toBe(tpPlusFn(resultMiss));
+  });
+});
+
+// ── F24 — D1 and D2 report identical numbers for the same edge type ──────────
+
+describe('F24 — D1 and D2 partition edges identically for the same tool and type', () => {
+  it('agree on IMPORTS TP/FP even when the tool also emits a File-granularity IMPORTS edge', () => {
+    const oracleSymbols: OracleSymbol[] = [
+      {
+        endLine: 1,
+        kind: 'Function',
+        localId: 'Baz',
+        name: 'Baz',
+        parentLocalId: null,
+        path: 'src/c.ts',
+        startLine: 1,
+      },
+    ];
+    const oracleEdges: OracleEdge[] = [
+      {
+        fromLocalId: 'src/a.ts',
+        fromPath: 'src/a.ts',
+        scoreable: true,
+        targetLocalId: 'Baz',
+        targetName: 'Baz',
+        targetPath: 'src/c.ts',
+        targetStartLine: 1,
+        type: 'IMPORTS',
+      },
+    ];
+
+    const toolNodes: GraphNode[] = [
+      mkToolNode('fileA', 'src/a.ts', 'src/a.ts', null, 'File'),
+      mkToolNode('fileC', 'src/c.ts', 'src/c.ts', null, 'File'),
+      mkToolNode('nBaz', 'Baz', 'src/c.ts', 1, 'Function'),
+    ];
+    const toolEdges: GraphEdge[] = [
+      mkToolEdge('fileA', 'nBaz', 'IMPORTS'), // symbol-level — a genuine TP
+      mkToolEdge('fileA', 'fileC', 'IMPORTS'), // F6: File-granularity — must be excluded from BOTH scorers' main table, not charged FP here
+    ];
+
+    const d1 = scoreD1(toolNodes, toolEdges, oracleSymbols, oracleEdges);
+    const d2 = scoreD2(toolNodes, toolEdges, oracleSymbols, oracleEdges);
+
+    const d1Imports = d1.perType.find((m) => m.edgeType === 'IMPORTS');
+    const d2Imports = d2.edges.byType.IMPORTS;
+
+    expect(d1Imports?.tp).toBe(d2Imports?.tp);
+    expect(d1Imports?.fp).toBe(d2Imports?.fp);
+    expect(d1Imports?.fn).toBe(d2Imports?.fn);
+    // The File-granularity pair must not be charged FP anywhere in this table —
+    // it's scored separately at module level (F6).
+    expect(d1Imports?.fp).toBe(0);
+    expect(d1Imports?.tp).toBe(1);
+  });
+
+  it('agree on IMPLEMENTS TP/FP, excluding member-level satisfaction from the class-level table', () => {
+    const oracleSymbols: OracleSymbol[] = [
+      {
+        endLine: 5,
+        kind: 'Class',
+        localId: 'Foo',
+        name: 'Foo',
+        parentLocalId: null,
+        path: 'src/a.ts',
+        startLine: 1,
+      },
+      {
+        endLine: 5,
+        kind: 'Interface',
+        localId: 'IBar',
+        name: 'IBar',
+        parentLocalId: null,
+        path: 'src/b.ts',
+        startLine: 1,
+      },
+      {
+        endLine: 3,
+        kind: 'Method',
+        localId: 'Foo.bar',
+        name: 'bar',
+        parentLocalId: 'Foo',
+        path: 'src/a.ts',
+        startLine: 2,
+      },
+    ];
+    const oracleEdges: OracleEdge[] = [
+      {
+        // class-level: Foo implements IBar
+        fromLocalId: 'Foo',
+        fromPath: 'src/a.ts',
+        scoreable: true,
+        targetLocalId: 'IBar',
+        targetName: 'IBar',
+        targetPath: 'src/b.ts',
+        targetStartLine: 1,
+        type: 'IMPLEMENTS',
+      },
+      {
+        // member-level (F8): Foo.bar satisfies IBar.bar
+        fromLocalId: 'Foo.bar',
+        fromPath: 'src/a.ts',
+        scoreable: true,
+        targetName: 'bar',
+        type: 'IMPLEMENTS',
+      },
+    ];
+
+    const toolNodes: GraphNode[] = [
+      mkToolNode('nFoo', 'Foo', 'src/a.ts', 1, 'Class'),
+      mkToolNode('nIBar', 'IBar', 'src/b.ts', 1, 'Interface'),
+      mkToolNode('nFooBar', 'bar', 'src/a.ts', 2, 'Method'),
+      mkToolNode('nIBarBar', 'bar', 'src/b.ts', 2, 'Method'),
+    ];
+    const toolEdges: GraphEdge[] = [
+      mkToolEdge('nFoo', 'nIBar', 'IMPLEMENTS'), // class-level
+      mkToolEdge('nFooBar', 'nIBarBar', 'IMPLEMENTS'), // member-level — must not land in the class-level table
+    ];
+
+    const d1 = scoreD1(toolNodes, toolEdges, oracleSymbols, oracleEdges);
+    const d2 = scoreD2(toolNodes, toolEdges, oracleSymbols, oracleEdges);
+
+    const d1Implements = d1.perType.find((m) => m.edgeType === 'IMPLEMENTS');
+    const d2Implements = d2.edges.byType.IMPLEMENTS;
+
+    expect(d1Implements?.tp).toBe(d2Implements?.tp);
+    expect(d1Implements?.fp).toBe(d2Implements?.fp);
+    expect(d1Implements?.fn).toBe(d2Implements?.fn);
+    expect(d1Implements?.tp).toBe(1); // only the class-level pair
+    expect(d1Implements?.fp).toBe(0);
+
+    // The member-level pair is scored in its own table, and only there.
+    expect(d2.edges.implementsMemberLevel.tp).toBe(1);
   });
 });

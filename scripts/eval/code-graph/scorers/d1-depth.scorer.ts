@@ -24,9 +24,10 @@ import {
   type EdgeAdjudication,
   type NodeMatch,
 } from '../matching/edge-adjudicator';
-import { matchNodes } from '../matching/node-identity.matcher';
+import { matchNodes, matchToolNodes } from '../matching/node-identity.matcher';
 import type { EdgeType, GraphEdge, GraphNode, OracleEdge, OracleSymbol } from '../types';
 import { COMPARABLE_EDGE_TYPES } from '../types';
+import { partitionEdgesForScoring } from './d2-fidelity.scorer';
 
 export interface DepthConfusionMatrix {
   edgeType: EdgeType;
@@ -39,12 +40,19 @@ export interface DepthConfusionMatrix {
   siteCoverage: number;
   /** Of oracleConfirmed, how many were confirmed by the type checker's resolved target (not just name). */
   targetConfirmed: number;
-  /** Tool's total edges of this type. */
+  /**
+   * Tool's total raw edges of this type — NOT the precision denominator
+   * (that's `tp + fp`). Includes edges routed to other tables by
+   * `partitionEdgesForScoring` (F6 File-granularity IMPORTS, F8 member-level
+   * IMPLEMENTS) and self-loop abstentions (F24).
+   */
   toolClaimed: number;
   toolPrecision: number;
   tp: number;
   /** F9 — oracle rows of this type excluded as unscoreable (target knowably external, or unresolvable). */
   unscoreableExcluded: number;
+  /** F18 — tool edges of this type that matched a `scoreable: false` oracle row instead of a genuine FP; excluded from precision and recall alike. */
+  unscoreableMatched: number;
   /** For Vyazen: of the tool's resolved edges, how many does the oracle confirm. */
   vyazenResolvedConfirmed?: number;
   /** For Vyazen: of the tool's resolved edges, how many does the type checker confirm the target. */
@@ -53,17 +61,21 @@ export interface DepthConfusionMatrix {
   vyazenResolvedTotal?: number;
 }
 
-/** F9 — see the twin helper in d2-fidelity.scorer.ts for rationale. */
+/** F9/F18 — see the twin helper in d2-fidelity.scorer.ts for rationale. */
 function computeEdgeFairness(
-  adjudication: Pick<EdgeAdjudication, 'scoreableOracleEdges' | 'unscoreableOracleEdges'>,
+  adjudication: Pick<
+    EdgeAdjudication,
+    'scoreableOracleEdges' | 'unscoreableMatched' | 'unscoreableOracleEdges'
+  >,
   type: EdgeType,
   tp: number
-): { siteCoverage: number; unscoreableExcluded: number } {
+): { siteCoverage: number; unscoreableExcluded: number; unscoreableMatched: number } {
   const totalSites = adjudication.scoreableOracleEdges
     .filter((e) => e.type === type)
     .reduce((sum, e) => sum + (e.siteCount ?? 1), 0);
   return {
     siteCoverage: safeDiv(tp, totalSites),
+    unscoreableMatched: adjudication.unscoreableMatched.filter((e) => e.type === type).length,
     unscoreableExcluded: adjudication.unscoreableOracleEdges.filter((e) => e.type === type).length,
   };
 }
@@ -97,10 +109,14 @@ export function scoreD1(
   const matchResult = matchNodes(toolNodes, oracleSymbols);
   const nodeMatches: NodeMatch[] = matchResult.matched;
 
+  // F24 — the same partition `scoreD2` applies (F6 IMPORTS granularity, F8
+  // member-vs-class IMPLEMENTS), so D1 and D2 report identical tp/fp/fn — and
+  // therefore identical precision — for the same tool and edge type.
+  const partition = partitionEdgesForScoring(toolEdges, toolNodes, oracleEdges, oracleSymbols);
   const adjudication = adjudicateEdges(
-    toolEdges.filter((e) => COMPARABLE_EDGE_TYPES.has(e.type)),
+    partition.symbolLevelToolEdges,
     toolNodes,
-    oracleEdges.filter((e) => COMPARABLE_EDGE_TYPES.has(e.type)),
+    partition.classLevelOracleEdges,
     nodeMatches,
     oracleSymbols
   );
@@ -175,14 +191,17 @@ export function crossToolCoverage(
   edgeType: EdgeType;
   vyazenResolved: number;
 }> {
-  // Match competitor nodes to Vyazen nodes (treating Vyazen as the reference)
-  const matchResult = matchNodes(competitorNodes, vyazenNodes);
-  const nodeMatches: NodeMatch[] = matchResult.matched;
+  // Match competitor nodes to Vyazen nodes (treating Vyazen as the reference).
+  // Both sides are GraphNode — matchNodes' claim key reads OracleSymbol.localId,
+  // which GraphNode doesn't have, so it must not be reused here (see
+  // matchToolNodes' doc comment).
+  const matchResult = matchToolNodes(competitorNodes, vyazenNodes);
+  const nodeMatches = matchResult.matched;
 
   // Build competitor → vyazen node id map
   const compToVyaz = new Map<string, GraphNode>();
   for (const m of nodeMatches) {
-    compToVyaz.set(m.tool.id, m.oracle as unknown as GraphNode);
+    compToVyaz.set(m.tool.id, m.reference);
   }
 
   // Index competitor edges by (vyazen-from-id, vyazen-to-name, type)

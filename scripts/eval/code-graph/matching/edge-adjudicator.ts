@@ -33,6 +33,16 @@ export interface EdgeAdjudication {
   scoreableOracleEdges: OracleEdge[];
   targetConfirmed: GraphEdge[];
   truePositives: GraphEdge[];
+  /**
+   * F18 — tool edges that would otherwise be a false positive, but happen to
+   * match a `scoreable: false` oracle row by (fromPath, fromLocalId, type,
+   * targetName). The oracle couldn't verify the target (external, or
+   * unresolvable after every fallback), so the tool's claim can't be
+   * confirmed OR refuted — it must not be charged FP for a gap in the
+   * oracle's own resolution. Excluded from precision and recall alike;
+   * reported as its own column, never silently dropped.
+   */
+  unscoreableMatched: GraphEdge[];
   /** F9 — oracle rows dropped before matching because `scoreable === false` (target knowably external, or unresolvable after every F10/F12 fallback). Reported as a coverage column, never folded into FN. */
   unscoreableOracleEdges: OracleEdge[];
 }
@@ -160,6 +170,10 @@ export function adjudicateEdges(
   const { edges: scoreableOracleEdges, unscoreable: unscoreableOracleEdges } =
     prepareOracleEdges(oracleEdges);
   const { byFromAndType, byName } = buildOracleIndices(scoreableOracleEdges);
+  // F18 — a second index over the rows the oracle couldn't verify, keyed
+  // identically to the scoreable index. Consulted only after both scoreable
+  // tiers miss, so it never steals a legitimate TP from the scoreable index.
+  const { byName: unscoreableByName } = buildOracleIndices(unscoreableOracleEdges);
   const matchedOracleEdges = new Set<OracleEdge>();
 
   const truePositives: GraphEdge[] = [];
@@ -167,6 +181,7 @@ export function adjudicateEdges(
   const targetConfirmed: GraphEdge[] = [];
   const nameOnlyConfirmed: GraphEdge[] = [];
   const abstained: GraphEdge[] = [];
+  const unscoreableMatched: GraphEdge[] = [];
 
   for (const edge of toolEdges) {
     // Abstention: a self-edge with no resolved target is "relationship detected,
@@ -208,74 +223,80 @@ export function adjudicateEdges(
 
     const ftKey = fromKey(oracleFromPath, oracleFromLocalId, edge.type);
     const candidates = byFromAndType.get(ftKey);
-    if (!candidates) {
-      falsePositives.push(edge);
-      continue;
-    }
-
-    // Tier 1: Try target-based matching (tool's to-node vs oracle's resolved target).
-    //
-    // Preferred: bridge through node identity. The tool's to-node was matched to
-    // an oracle symbol (toOracle); if that symbol IS the oracle edge's resolved
-    // target (same path + localId), the edge points at the right code. This is
-    // robust to per-tool line conventions (doc-comment/decorator offsets) because
-    // the node matcher already absorbed them.
-    //
-    // Fallback: raw (path, line±2) comparison, for to-nodes the matcher couldn't
-    // bind to an oracle symbol (e.g. external targets, unmatched nodes).
-    const toOracle = toolToOracle.get(edge.toId);
-    let matched = false;
-    for (const cand of candidates) {
-      if (matchedOracleEdges.has(cand)) {
-        continue;
-      }
-      if (!cand.targetPath) {
-        continue; // oracle didn't resolve this one
-      }
-
-      let hit = false;
-      if (toOracle && cand.targetLocalId) {
-        hit =
-          normPath(cand.targetPath) === normPath(toOracle.path) &&
-          cand.targetLocalId === toOracle.localId;
-      }
-      if (!hit && toTool.path && toTool.startLine !== null && toTool.startLine !== undefined) {
-        hit =
-          normPath(cand.targetPath) === normPath(toTool.path) &&
-          linesMatch(cand.targetStartLine, toTool.startLine);
-      }
-
-      if (hit) {
-        matchedOracleEdges.add(cand);
-        truePositives.push(edge);
-        targetConfirmed.push(edge);
-        matched = true;
-        break;
-      }
-    }
-
-    if (matched) {
-      continue;
-    }
-
-    // Tier 2: Name-based fallback
     const nameKey = `${ftKey}\0${toTool.name}`;
-    const nameCandidates = byName.get(nameKey);
-    if (nameCandidates) {
-      for (const cand of nameCandidates) {
+    let matched = false;
+
+    if (candidates) {
+      // Tier 1: Try target-based matching (tool's to-node vs oracle's resolved target).
+      //
+      // Preferred: bridge through node identity. The tool's to-node was matched to
+      // an oracle symbol (toOracle); if that symbol IS the oracle edge's resolved
+      // target (same path + localId), the edge points at the right code. This is
+      // robust to per-tool line conventions (doc-comment/decorator offsets) because
+      // the node matcher already absorbed them.
+      //
+      // Fallback: raw (path, line±2) comparison, for to-nodes the matcher couldn't
+      // bind to an oracle symbol (e.g. external targets, unmatched nodes).
+      const toOracle = toolToOracle.get(edge.toId);
+      for (const cand of candidates) {
         if (matchedOracleEdges.has(cand)) {
           continue;
         }
-        matchedOracleEdges.add(cand);
-        truePositives.push(edge);
-        nameOnlyConfirmed.push(edge);
-        matched = true;
-        break;
+        if (!cand.targetPath) {
+          continue; // oracle didn't resolve this one
+        }
+
+        let hit = false;
+        if (toOracle && cand.targetLocalId) {
+          hit =
+            normPath(cand.targetPath) === normPath(toOracle.path) &&
+            cand.targetLocalId === toOracle.localId;
+        }
+        if (!hit && toTool.path && toTool.startLine !== null && toTool.startLine !== undefined) {
+          hit =
+            normPath(cand.targetPath) === normPath(toTool.path) &&
+            linesMatch(cand.targetStartLine, toTool.startLine);
+        }
+
+        if (hit) {
+          matchedOracleEdges.add(cand);
+          truePositives.push(edge);
+          targetConfirmed.push(edge);
+          matched = true;
+          break;
+        }
+      }
+    }
+
+    // Tier 2: Name-based fallback
+    if (!matched) {
+      const nameCandidates = byName.get(nameKey);
+      if (nameCandidates) {
+        for (const cand of nameCandidates) {
+          if (matchedOracleEdges.has(cand)) {
+            continue;
+          }
+          matchedOracleEdges.add(cand);
+          truePositives.push(edge);
+          nameOnlyConfirmed.push(edge);
+          matched = true;
+          break;
+        }
       }
     }
 
     if (!matched) {
-      falsePositives.push(edge);
+      // F18: before charging FP, check whether this edge matches a row the
+      // oracle itself couldn't verify (scoreable: false) — by the same
+      // (fromPath, fromLocalId, type, targetName) key as Tier 2. If so, the
+      // oracle has neither confirmed nor refuted the claim; score it as
+      // neither rather than penalising the tool for the oracle's own gap.
+      const unscoreableCandidates = unscoreableByName.get(nameKey);
+      if (unscoreableCandidates && unscoreableCandidates.length > 0) {
+        unscoreableMatched.push(edge);
+      } else {
+        falsePositives.push(edge);
+      }
     }
   }
 
@@ -297,6 +318,7 @@ export function adjudicateEdges(
     abstained,
     scoreableOracleEdges,
     unscoreableOracleEdges,
+    unscoreableMatched,
     matchedOracleEdgesList: [...matchedOracleEdges],
   };
 }

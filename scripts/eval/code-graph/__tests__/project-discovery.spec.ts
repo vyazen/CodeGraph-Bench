@@ -102,6 +102,70 @@ describe('discoverProjects — one project per package.json (mirrors project det
   });
 });
 
+describe('F17 — a tsconfig directory with no adjacent package.json gets its own project', () => {
+  it('gives a tsconfig-only directory its own project, distinct from the package.json-only root', () => {
+    const files = ['package.json', 'src/tsconfig.json', 'src/vs/base/common/uri.ts', 'src/main.ts'];
+    const projects = discoverProjects(files);
+    expect(projects.length).toBe(2);
+
+    const root = projectAt('.', projects);
+    expect(root?.tsconfigPath).toBeNull();
+    expect(root?.languages).toEqual(['JavaScript']);
+
+    const src = projectAt('src', projects);
+    expect(src?.tsconfigPath).toBe('src/tsconfig.json');
+    expect(src?.languages).toEqual(['TypeScript', 'JavaScript']);
+  });
+
+  it('does not duplicate the root project when its only tsconfig has no package.json at all', () => {
+    const files = ['tsconfig.json', 'index.ts'];
+    const projects = discoverProjects(files);
+    expect(projects.length).toBe(1);
+    expect(projects[0].rootPath).toBe('.');
+    expect(projects[0].tsconfigPath).toBe('tsconfig.json');
+  });
+
+  it('creates one project per tsconfig-only directory, not just the first one found', () => {
+    const files = [
+      'package.json',
+      'src/tsconfig.json',
+      'src/index.ts',
+      'extensions/foo/tsconfig.json',
+      'extensions/foo/index.ts',
+    ];
+    const projects = discoverProjects(files);
+    expect(projectAt('src', projects)?.tsconfigPath).toBe('src/tsconfig.json');
+    expect(projectAt('extensions/foo', projects)?.tsconfigPath).toBe(
+      'extensions/foo/tsconfig.json'
+    );
+  });
+
+  it('still applies tsconfig priority ordering within a tsconfig-only project', () => {
+    const files = ['package.json', 'src/tsconfig.json', 'src/tsconfig.base.json', 'src/index.ts'];
+    const projects = discoverProjects(files);
+    expect(projectAt('src', projects)?.tsconfigPath).toBe('src/tsconfig.json');
+  });
+
+  it('does not create a duplicate project for a tsconfig-only directory already covered by its own package.json', () => {
+    const files = [
+      'package.json',
+      'apps/foo/package.json',
+      'apps/foo/tsconfig.json',
+      'apps/foo/index.ts',
+    ];
+    const projects = discoverProjects(files);
+    expect(projects.length).toBe(2);
+  });
+
+  it('assigns files under the new tsconfig-only project to it, not the root, via deepest-root-wins', () => {
+    const files = ['package.json', 'src/tsconfig.json', 'src/vs/base/common/uri.ts', 'top.ts'];
+    const projects = discoverProjects(files);
+    const ownership = assignFileOwnership(projects, files);
+    expect(ownership.get('src/vs/base/common/uri.ts')).toBe(projectAt('src', projects));
+    expect(ownership.get('top.ts')).toBe(projectAt('.', projects));
+  });
+});
+
 describe('selectTsconfigForProject — reimplementation parity smoke test', () => {
   it('returns null when no tsconfig sits directly at the project root', () => {
     expect(selectTsconfigForProject('.', ['index.ts'])).toBeNull();

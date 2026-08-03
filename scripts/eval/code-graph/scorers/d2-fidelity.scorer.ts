@@ -49,6 +49,13 @@ export interface KindMetrics {
 export interface EdgeFairnessMetrics {
   siteCoverage: number;
   unscoreableExcluded: number;
+  /**
+   * F18 — tool edges of this type that would otherwise be FP, but matched a
+   * `scoreable: false` oracle row instead (the oracle couldn't verify the
+   * target, so the claim can't be judged). Excluded from precision and
+   * recall alike; never folded into FP.
+   */
+  unscoreableMatched: number;
 }
 
 export interface EdgeTypeMetrics extends KindMetrics, EdgeFairnessMetrics {
@@ -79,6 +86,12 @@ export interface ImportModuleLevelMetrics {
   /** Tool file→file dependency pairs. */
   toolPairs: number;
   tp: number;
+  /**
+   * F19 — unmatched tool pairs excused because the oracle couldn't resolve
+   * enough of that file's imports to judge them. See `scoreImportsModuleLevel`
+   * for the budget mechanism. Excluded from `fp`; never silently dropped.
+   */
+  unscoreableExcluded: number;
 }
 
 /**
@@ -127,6 +140,15 @@ export interface D2Report {
      * attributes type references to a different container than the oracle.
      */
     usesTypeFromAgnostic: KindMetrics;
+    /**
+     * Phase 5 (VSCODE_CODE_GRAPH_EVAL_PLAN.md §5, item 2): METHOD_OVERRIDES
+     * scored from-side-agnostically — per (containing class, base target)
+     * pair, ignoring whether the edge is attributed to the class or the
+     * overriding method. GitNexus attributes to the Class; the oracle
+     * attributes to the overriding Method. Same mismatch shape as USES_TYPE
+     * (F4), scored the same way.
+     */
+    methodOverridesFromAgnostic: KindMetrics;
   };
   nodes: {
     byKind: Partial<Record<SymbolType, KindMetrics>>;
@@ -136,6 +158,13 @@ export interface D2Report {
       overall: KindLabellingMetrics;
     };
     macroF1: number;
+    /**
+     * F22 — tool node rows collapsed as duplicates of an already-seen
+     * (path, canonicalName, kind, startLine) row before matching. A tool
+     * emitting the same symbol twice is a modelling note, not N-1 fabricated
+     * false positives.
+     */
+    duplicateNodesCollapsed: number;
     overall: KindMetrics;
     oracleMatchRate: number;
     toolMatchRate: number;
@@ -163,6 +192,16 @@ function isMemberSourceKind(kind: SymbolType | undefined): boolean {
  * where the oracle attributes to Property) at all, instead of an arithmetic
  * near-zero.
  */
+/**
+ * F21 — the oracle's `targetName` is always present, resolved or not; a tool
+ * pair should therefore match by strict identity (bound to the same oracle
+ * symbol) OR by bare target name, whichever line up. Building only an
+ * identity-format key for a resolved oracle row and only a name-format key
+ * for a tool whose to-node never bound to an oracle symbol made the two
+ * formats mutually exclusive by construction — the two keys could never be
+ * equal even when they plainly named the same target. This tracks both
+ * dimensions and counts a match on either.
+ */
 function scoreUsesTypeFromAgnostic(
   toolEdges: GraphEdge[],
   toolNodes: GraphNode[],
@@ -172,46 +211,183 @@ function scoreUsesTypeFromAgnostic(
   const toolNodeById = new Map(toolNodes.map((n) => [n.id, n]));
   const toolToOracle = new Map(edgeNodeMatches.map((m) => [m.tool.id, m.oracle]));
 
-  const oraclePairs = new Set<string>();
+  const oracleIdKeys = new Set<string>();
+  const oracleNameKeys = new Set<string>();
+  const oracleCanonicalPairs = new Set<string>();
   for (const e of oracleEdges) {
     if (e.type !== 'USES_TYPE') {
       continue;
     }
-    const targetKey = e.targetLocalId
-      ? `${normPathLocal(e.targetPath ?? '')}\0${e.targetLocalId}`
-      : `name:${e.targetName}`;
-    oraclePairs.add(`${normPathLocal(e.fromPath)}\0${targetKey}`);
+    const from = normPathLocal(e.fromPath);
+    const nameKey = `${from}\0name:${e.targetName}`;
+    oracleNameKeys.add(nameKey);
+    if (e.targetLocalId) {
+      const idKey = `${from}\0id:${normPathLocal(e.targetPath ?? '')}\0${e.targetLocalId}`;
+      oracleIdKeys.add(idKey);
+      oracleCanonicalPairs.add(idKey);
+    } else {
+      oracleCanonicalPairs.add(nameKey);
+    }
   }
 
-  const toolPairs = new Set<string>();
+  const toolCanonicalPairs = new Set<string>();
+  let tp = 0;
   for (const e of toolEdges) {
     if (e.type !== 'USES_TYPE') {
       continue;
     }
     const fromNode = toolNodeById.get(e.fromId);
-    if (!fromNode) {
-      continue;
-    }
     const toNode = toolNodeById.get(e.toId);
-    const toOracle = toNode ? toolToOracle.get(toNode.id) : undefined;
-    const targetKey = toOracle
-      ? `${normPathLocal(toOracle.path)}\0${toOracle.localId}`
-      : toNode
-        ? `name:${toNode.name}`
-        : null;
-    if (!targetKey) {
+    if (!(fromNode && toNode)) {
       continue;
     }
-    toolPairs.add(`${normPathLocal(fromNode.path)}\0${targetKey}`);
-  }
+    const toOracle = toolToOracle.get(toNode.id);
+    const from = normPathLocal(fromNode.path);
+    const idKey = toOracle
+      ? `${from}\0id:${normPathLocal(toOracle.path)}\0${toOracle.localId}`
+      : null;
+    const nameKey = `${from}\0name:${toOracle ? toOracle.name : toNode.name}`;
+    const canonicalKey = idKey ?? nameKey;
 
-  let tp = 0;
-  for (const p of toolPairs) {
-    if (oraclePairs.has(p)) {
+    if (toolCanonicalPairs.has(canonicalKey)) {
+      continue; // already counted this distinct (from, target) relationship
+    }
+    toolCanonicalPairs.add(canonicalKey);
+
+    if ((idKey && oracleIdKeys.has(idKey)) || oracleNameKeys.has(nameKey)) {
       tp++;
     }
   }
-  return computeMetrics(tp, toolPairs.size - tp, oraclePairs.size - tp);
+
+  return computeMetrics(tp, toolCanonicalPairs.size - tp, oracleCanonicalPairs.size - tp);
+}
+
+/**
+ * Phase 5, item 2 — METHOD_OVERRIDES, from-side-agnostic. The oracle
+ * attributes an override to the overriding Method (`fromLocalId` is the
+ * method itself); GitNexus attributes it to the containing Class instead
+ * (verified against `data/gitnexus/edges.jsonl`: `fromId` is always a
+ * `Class:...` node, `toId` the base `Method:...`). That's a from-side
+ * convention mismatch, not a quality difference — scoring it strictly (as
+ * `extendedByType` does) forces 0 TP by construction, same failure shape F4
+ * fixed for USES_TYPE. Score per (containing class, base target) pair,
+ * climbing the tool's from-node up to its containing class when it isn't
+ * one already, so both conventions land on the same key.
+ */
+function scoreMethodOverridesFromAgnostic(
+  toolEdges: GraphEdge[],
+  toolNodes: GraphNode[],
+  oracleEdges: OracleEdge[],
+  oracleSymbols: OracleSymbol[],
+  edgeNodeMatches: NodeMatch[]
+): KindMetrics {
+  const toolNodeById = new Map(toolNodes.map((n) => [n.id, n]));
+  const toolToOracle = new Map(edgeNodeMatches.map((m) => [m.tool.id, m.oracle]));
+  const oracleByPathLocalId = new Map(
+    oracleSymbols.map((s) => [`${normPathLocal(s.path)}\0${s.localId}`, s])
+  );
+
+  const classKey = (path: string, localId: string): string =>
+    `id:${normPathLocal(path)}\0${localId}`;
+  const classKeyFallback = (path: string, name: string): string =>
+    `name:${normPathLocal(path)}\0${name}`;
+
+  // Fallback only: walk the tool's own parentId chain to find a containing
+  // Class. Not the primary path — a tool's parentId wiring is adapter-specific
+  // and not guaranteed, whereas the oracle match (below) is authoritative
+  // whenever it exists.
+  const climbToClass = (node: GraphNode): GraphNode => {
+    let cur: GraphNode | undefined = node;
+    let hops = 0;
+    while (cur && cur.kind !== 'Class' && cur.parentId && hops < 10) {
+      cur = toolNodeById.get(cur.parentId);
+      hops++;
+    }
+    return cur && cur.kind === 'Class' ? cur : node;
+  };
+
+  /**
+   * Resolve the (containing class) half of the pair key for a tool's
+   * from-node, regardless of whether that node IS the class (GitNexus's
+   * convention) or the overriding method (the oracle's convention, and any
+   * tool that matched it). Preferring the oracle match over the tool's own
+   * graph structure means this works even when a tool's `parentId` isn't
+   * populated (e.g. a from-node matched directly to an oracle Method symbol
+   * already carries `parentLocalId` — no tree-walk needed).
+   */
+  const resolveClassKey = (fromNode: GraphNode): string => {
+    const oracleSym = toolToOracle.get(fromNode.id);
+    if (oracleSym) {
+      if (oracleSym.kind === 'Class') {
+        return classKey(oracleSym.path, oracleSym.localId);
+      }
+      if (oracleSym.parentLocalId) {
+        return classKey(oracleSym.path, oracleSym.parentLocalId);
+      }
+    }
+    const classNode = climbToClass(fromNode);
+    const classOracle = toolToOracle.get(classNode.id);
+    return classOracle
+      ? classKey(classOracle.path, classOracle.localId)
+      : classKeyFallback(classNode.path, classNode.name);
+  };
+
+  // F21 — same identity-or-name fix as scoreUsesTypeFromAgnostic, applied to
+  // the target half of the (class, target) pair key. The class half (cKey)
+  // is untouched: the oracle side is always id-based there (a `fromSym` is
+  // always found via `?? e.fromLocalId`), so that dimension never hits the
+  // mismatch this fix addresses.
+  const oracleIdPairs = new Set<string>();
+  const oracleNamePairs = new Set<string>();
+  const oracleCanonicalPairs = new Set<string>();
+  for (const e of oracleEdges) {
+    if (e.type !== 'METHOD_OVERRIDES') {
+      continue;
+    }
+    const fromSym = oracleByPathLocalId.get(`${normPathLocal(e.fromPath)}\0${e.fromLocalId}`);
+    const containingClassLocalId = fromSym?.parentLocalId ?? e.fromLocalId;
+    const cKey = classKey(e.fromPath, containingClassLocalId);
+    const nameKey = `${cKey}\0name:${e.targetName}`;
+    oracleNamePairs.add(nameKey);
+    if (e.targetLocalId) {
+      const idKey = `${cKey}\0id:${normPathLocal(e.targetPath ?? '')}\0${e.targetLocalId}`;
+      oracleIdPairs.add(idKey);
+      oracleCanonicalPairs.add(idKey);
+    } else {
+      oracleCanonicalPairs.add(nameKey);
+    }
+  }
+
+  const toolCanonicalPairs = new Set<string>();
+  let tp = 0;
+  for (const e of toolEdges) {
+    if (e.type !== 'METHOD_OVERRIDES') {
+      continue;
+    }
+    const fromNode = toolNodeById.get(e.fromId);
+    const toNode = toolNodeById.get(e.toId);
+    if (!(fromNode && toNode)) {
+      continue;
+    }
+    const cKey = resolveClassKey(fromNode);
+    const toOracle = toolToOracle.get(toNode.id);
+    const idKey = toOracle
+      ? `${cKey}\0id:${normPathLocal(toOracle.path)}\0${toOracle.localId}`
+      : null;
+    const nameKey = `${cKey}\0name:${toOracle ? toOracle.name : toNode.name}`;
+    const canonicalKey = idKey ?? nameKey;
+
+    if (toolCanonicalPairs.has(canonicalKey)) {
+      continue; // already counted this distinct (class, target) relationship
+    }
+    toolCanonicalPairs.add(canonicalKey);
+
+    if ((idKey && oracleIdPairs.has(idKey)) || oracleNamePairs.has(nameKey)) {
+      tp++;
+    }
+  }
+
+  return computeMetrics(tp, toolCanonicalPairs.size - tp, oracleCanonicalPairs.size - tp);
 }
 
 function computeMetrics(tp: number, fp: number, fn: number): KindMetrics {
@@ -219,6 +395,81 @@ function computeMetrics(tp: number, fp: number, fn: number): KindMetrics {
   const recall = safeDiv(tp, tp + fn);
   const f1 = safeDiv(2 * precision * recall, precision + recall);
   return { f1, fn, fp, precision, recall, tp };
+}
+
+export interface EdgeScoringPartition {
+  /** Comparable oracle edges eligible for the main table (member-level IMPLEMENTS excluded). */
+  classLevelOracleEdges: OracleEdge[];
+  /** Oracle IMPLEMENTS edges sourced from a class member (F8) — scored separately. */
+  memberImplementsOracleEdges: OracleEdge[];
+  /** Tool IMPLEMENTS edges sourced from a class member (F8) — scored separately (`implementsMemberLevel`), never in the main table. */
+  memberImplementsToolEdges: GraphEdge[];
+  /** Comparable tool edges eligible for the main table: symbol-level IMPORTS, class-level IMPLEMENTS, and every other comparable type unfiltered. */
+  symbolLevelToolEdges: GraphEdge[];
+}
+
+/**
+ * F24 — the F6 (IMPORTS granularity) and F8 (member- vs class-level
+ * IMPLEMENTS) partitioning used to live only inside `scoreD2`, so `scoreD1`
+ * adjudicated the *unpartitioned* comparable-edge set and printed a different
+ * precision/FP count for the same tool and the same edge type (e.g. Vyazen
+ * IMPORTS 96.9% in D2 vs 75.5% in D1 — D1 was charging FP for File-granularity
+ * IMPORTS that D2 correctly routes to the module-level table instead). Both
+ * scorers must partition identically before adjudicating, so this is
+ * extracted once and shared rather than reimplemented per scorer.
+ */
+export function partitionEdgesForScoring(
+  toolEdges: GraphEdge[],
+  toolNodes: GraphNode[],
+  oracleEdges: OracleEdge[],
+  oracleSymbols: OracleSymbol[]
+): EdgeScoringPartition {
+  const toolNodeById = new Map(toolNodes.map((n) => [n.id, n]));
+  const oracleSymbolKind = new Map<string, SymbolType>();
+  for (const s of oracleSymbols) {
+    oracleSymbolKind.set(`${s.path}\0${s.localId}`, s.kind);
+  }
+  const isOracleMemberImplements = (e: OracleEdge) =>
+    e.type === 'IMPLEMENTS' &&
+    isMemberSourceKind(oracleSymbolKind.get(`${e.fromPath}\0${e.fromLocalId}`));
+  const isToolMemberImplements = (e: GraphEdge) =>
+    e.type === 'IMPLEMENTS' && isMemberSourceKind(toolNodeById.get(e.fromId)?.kind);
+
+  const symbolLevelToolEdges: GraphEdge[] = [];
+  const memberImplementsToolEdges: GraphEdge[] = [];
+  for (const e of toolEdges) {
+    if (!COMPARABLE_EDGE_TYPES.has(e.type)) {
+      continue;
+    }
+    if (e.type === 'IMPORTS' && toolNodeById.get(e.toId)?.kind === 'File') {
+      continue;
+    }
+    if (isToolMemberImplements(e)) {
+      memberImplementsToolEdges.push(e);
+      continue;
+    }
+    symbolLevelToolEdges.push(e);
+  }
+
+  const classLevelOracleEdges: OracleEdge[] = [];
+  const memberImplementsOracleEdges: OracleEdge[] = [];
+  for (const e of oracleEdges) {
+    if (!COMPARABLE_EDGE_TYPES.has(e.type)) {
+      continue;
+    }
+    if (isOracleMemberImplements(e)) {
+      memberImplementsOracleEdges.push(e);
+    } else {
+      classLevelOracleEdges.push(e);
+    }
+  }
+
+  return {
+    classLevelOracleEdges,
+    memberImplementsOracleEdges,
+    memberImplementsToolEdges,
+    symbolLevelToolEdges,
+  };
 }
 
 /**
@@ -231,7 +482,10 @@ function computeMetrics(tp: number, fp: number, fn: number): KindMetrics {
  * (it didn't assert every site) — that's a capability note, not a penalty.
  */
 function computeEdgeFairness(
-  adjudication: Pick<EdgeAdjudication, 'scoreableOracleEdges' | 'unscoreableOracleEdges'>,
+  adjudication: Pick<
+    EdgeAdjudication,
+    'scoreableOracleEdges' | 'unscoreableMatched' | 'unscoreableOracleEdges'
+  >,
   type: EdgeType,
   tp: number
 ): EdgeFairnessMetrics {
@@ -240,6 +494,7 @@ function computeEdgeFairness(
     .reduce((sum, e) => sum + (e.siteCount ?? 1), 0);
   return {
     siteCoverage: safeDiv(tp, totalSites),
+    unscoreableMatched: adjudication.unscoreableMatched.filter((e) => e.type === type).length,
     unscoreableExcluded: adjudication.unscoreableOracleEdges.filter((e) => e.type === type).length,
   };
 }
@@ -247,6 +502,27 @@ function computeEdgeFairness(
 /**
  * Compute module-level IMPORTS: convert File→Symbol edges to File→File pairs.
  * Both tools can compete at this level.
+ *
+ * F19 — an oracle IMPORTS row with no `targetPath` (the type checker couldn't
+ * resolve the import specifier to a file) can't be turned into a file-pair at
+ * all, so it was previously just skipped — the correct call for the recall
+ * side (an unresolvable row was never going to be in the denominator), but
+ * unresolved rows still silently vanished from the tool's side of the ledger
+ * too: a tool's file-pair guess that happens to be right can never be
+ * confirmed (no oraclePairs entry to match), and one that's wrong is charged
+ * FP identically to a genuinely fabricated dependency. Both look the same:
+ * "not in oraclePairs".
+ *
+ * Fix: give each source file a per-file *budget* equal to its count of
+ * oracle-unresolved imports — the number of dependencies that file has which
+ * the oracle itself couldn't verify. Any of that file's unmatched tool pairs,
+ * up to the budget, are excused (`unscoreableExcluded`) rather than charged
+ * FP. This is deliberately a capacity bound, not an exact identity match
+ * (unlike F18's symbol-level fix): the oracle knows a file has N unverifiable
+ * imports but not which N target files they resolve to, so there is no exact
+ * key to match a tool's guess against. Any unmatched pairs beyond the budget
+ * are still FP — a tool cannot claim more file-level dependencies than the
+ * file has unverifiable imports and expect all of them excused.
  */
 function scoreImportsModuleLevel(
   toolEdges: GraphEdge[],
@@ -255,27 +531,30 @@ function scoreImportsModuleLevel(
 ): ImportModuleLevelMetrics {
   const toolNodeById = new Map(toolNodes.map((n) => [n.id, n]));
 
-  // Convert tool IMPORTS edges to file→file pairs
-  const toolPairs = new Set<string>();
+  // Convert tool IMPORTS edges to file→file pairs, grouped by source file so
+  // the per-file budget below can be applied.
+  const toolPairsByFrom = new Map<string, Set<string>>();
   for (const e of toolEdges) {
     if (e.type !== 'IMPORTS') {
       continue;
     }
     const from = toolNodeById.get(e.fromId);
     const to = toolNodeById.get(e.toId);
-    if (!(from && to)) {
+    if (!(from?.path && to?.path)) {
       continue;
     }
-    // File→File pair: (from.path, to.path)
-    if (from.path && to.path) {
-      const key = `${from.path}\0${to.path}`;
-      toolPairs.add(key);
+    let bucket = toolPairsByFrom.get(from.path);
+    if (!bucket) {
+      bucket = new Set<string>();
+      toolPairsByFrom.set(from.path, bucket);
     }
+    bucket.add(to.path);
   }
 
   // Convert oracle IMPORTS edges to file→file pairs.
   // Oracle IMPORTS: fromLocalId = file path, targetPath = resolved target file (if available)
   const oraclePairs = new Set<string>();
+  const unresolvedImportBudget = new Map<string, number>();
   for (const e of oracleEdges) {
     if (e.type !== 'IMPORTS') {
       continue;
@@ -283,18 +562,34 @@ function scoreImportsModuleLevel(
     if (e.targetPath) {
       // Type-checker resolved: we know the target file
       oraclePairs.add(`${e.fromLocalId}\0${e.targetPath}`);
+    } else {
+      // Unresolved: can't form a pair, but this file has one more import the
+      // oracle can't judge — grant a budget slot instead of skipping silently.
+      unresolvedImportBudget.set(
+        e.fromLocalId,
+        (unresolvedImportBudget.get(e.fromLocalId) ?? 0) + 1
+      );
     }
-    // If no targetPath, we can't determine the target file — skip
   }
 
-  // Compute P/R/F1 on file pairs
   let tp = 0;
-  for (const p of toolPairs) {
-    if (oraclePairs.has(p)) {
-      tp++;
+  let fp = 0;
+  let unscoreableExcluded = 0;
+  let toolPairsTotal = 0;
+  for (const [fromPath, toPaths] of toolPairsByFrom) {
+    toolPairsTotal += toPaths.size;
+    let budget = unresolvedImportBudget.get(fromPath) ?? 0;
+    for (const toPath of toPaths) {
+      if (oraclePairs.has(`${fromPath}\0${toPath}`)) {
+        tp++;
+      } else if (budget > 0) {
+        budget--;
+        unscoreableExcluded++;
+      } else {
+        fp++;
+      }
     }
   }
-  const fp = toolPairs.size - tp;
   const fn = oraclePairs.size - tp;
 
   return {
@@ -303,8 +598,9 @@ function scoreImportsModuleLevel(
     precision: safeDiv(tp, tp + fp),
     recall: safeDiv(tp, tp + fn),
     oraclePairs: oraclePairs.size,
-    toolPairs: toolPairs.size,
+    toolPairs: toolPairsTotal,
     tp,
+    unscoreableExcluded,
   };
 }
 
@@ -428,46 +724,26 @@ export function scoreD2(
   // symbol-level table. Applied identically to every tool.
   const toolNodeByIdForRouting = new Map(toolNodes.map((n) => [n.id, n]));
 
-  // F8: the oracle's class-level IMPLEMENTS (heritage clause) and
+  // F8/F24: the oracle's class-level IMPLEMENTS (heritage clause) and
   // member-level IMPLEMENTS (a member satisfying an interface member) share
   // the EdgeType but must not share a denominator — a tool emitting only one
-  // of the two must not be penalised against the other. Kind of the
-  // *oracle's* from-symbol decides which table an oracle edge belongs to;
-  // kind of the *tool's* from-node decides which table a tool edge belongs to.
-  const oracleSymbolKind = new Map<string, SymbolType>();
-  for (const s of oracleSymbols) {
-    oracleSymbolKind.set(`${s.path}\0${s.localId}`, s.kind);
-  }
-  const isOracleMemberImplements = (e: OracleEdge) =>
-    e.type === 'IMPLEMENTS' &&
-    isMemberSourceKind(oracleSymbolKind.get(`${e.fromPath}\0${e.fromLocalId}`));
-  const isToolMemberImplements = (e: GraphEdge) =>
-    e.type === 'IMPLEMENTS' && isMemberSourceKind(toolNodeByIdForRouting.get(e.fromId)?.kind);
-
-  const symbolLevelToolEdges = toolEdges.filter((e) => {
-    if (!COMPARABLE_EDGE_TYPES.has(e.type)) {
-      return false;
-    }
-    if (e.type === 'IMPORTS' && toolNodeByIdForRouting.get(e.toId)?.kind === 'File') {
-      return false;
-    }
-    if (isToolMemberImplements(e)) {
-      return false;
-    }
-    return true;
-  });
+  // of the two must not be penalised against the other. Shared with `scoreD1`
+  // via `partitionEdgesForScoring` so both scorers adjudicate the identical
+  // edge population for a given type (F24).
+  const partition = partitionEdgesForScoring(toolEdges, toolNodes, oracleEdges, oracleSymbols);
+  const symbolLevelToolEdges = partition.symbolLevelToolEdges;
   const adjudication = adjudicateEdges(
     symbolLevelToolEdges,
     toolNodes,
-    oracleEdges.filter((e) => COMPARABLE_EDGE_TYPES.has(e.type) && !isOracleMemberImplements(e)),
+    partition.classLevelOracleEdges,
     edgeNodeMatches,
     oracleSymbols
   );
 
   const memberImplementsAdj = adjudicateEdges(
-    toolEdges.filter(isToolMemberImplements),
+    partition.memberImplementsToolEdges,
     toolNodes,
-    oracleEdges.filter(isOracleMemberImplements),
+    partition.memberImplementsOracleEdges,
     edgeNodeMatches,
     oracleSymbols
   );
@@ -566,6 +842,15 @@ export function scoreD2(
     edgeNodeMatches
   );
 
+  // ── Phase 5: METHOD_OVERRIDES, from-side-agnostic ──────────────────────────
+  const methodOverridesFromAgnostic = scoreMethodOverridesFromAgnostic(
+    toolEdges,
+    toolNodes,
+    oracleEdges,
+    oracleSymbols,
+    edgeNodeMatches
+  );
+
   // ── Structural metrics ─────────────────────────────────────────────────────
   const selfLoopLeak = toolEdges.filter((e) => e.fromId === e.toId).length;
   const nodeIds = new Set(toolNodes.map((n) => n.id));
@@ -584,6 +869,7 @@ export function scoreD2(
       >,
       implementsMemberLevel,
       importsModuleLevel,
+      methodOverridesFromAgnostic,
       overall: overallEdges,
       selfLoopLeak,
       targetAccuracy: safeDiv(totalTargetConfirmed, totalTpEdges),
@@ -591,6 +877,7 @@ export function scoreD2(
     },
     nodes: {
       byKind: Object.fromEntries(byKind) as Partial<Record<SymbolType, KindMetrics>>,
+      duplicateNodesCollapsed: matchResult.duplicateToolNodesCollapsed,
       kindLabelling,
       macroF1,
       overall: overallNodes,

@@ -1221,8 +1221,15 @@ export async function runTypeCheckerOracle(
       );
     }
 
-    allSymbols.push(...symbols);
-    allEdges.push(...edges);
+    // Not `push(...symbols)` — spreading tens/hundreds of thousands of elements
+    // as call arguments blows the engine's argument-count limit (hit at vscode's
+    // root project: 122,594 symbols / 728,994 edges in one project).
+    for (const s of symbols) {
+      allSymbols.push(s);
+    }
+    for (const e of edges) {
+      allEdges.push(e);
+    }
   }
 
   const resolvedCount = allEdges.filter((e) => e.targetLocalId).length;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { TsTypeCheckerOracle } from '../oracle/ts-typechecker.oracle';
 import type { OracleEdge, OracleSymbol } from '../types';
 
@@ -21,6 +21,26 @@ function runOracle(files: Record<string, string>) {
   writeFileSync(join(dir, 'tsconfig.json'), TSCONFIG);
   for (const [name, content] of Object.entries(files)) {
     writeFileSync(join(dir, name), content);
+  }
+  try {
+    return new TsTypeCheckerOracle().analyze(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Like `runOracle`, but doesn't force a single root tsconfig and creates
+ * intermediate directories as needed — for multi-project fixtures (F17),
+ * where the point is that different subtrees get different tsconfigs (or
+ * none at all).
+ */
+function runOracleMultiProject(files: Record<string, string>) {
+  const dir = mkdtempSync(join(tmpdir(), 'oracle-multiproject-fixture-'));
+  for (const [name, content] of Object.entries(files)) {
+    const filePath = join(dir, name);
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, content);
   }
   try {
     return new TsTypeCheckerOracle().analyze(dir);
@@ -390,5 +410,38 @@ describe('F12 — [expr] heritage resolution', () => {
     if (!edge?.targetLocalId) {
       expect(edge?.scoreable).toBe(false);
     }
+  });
+});
+
+describe('F17 — tsconfig directories with no adjacent package.json get their own project', () => {
+  it('resolves an AMD baseUrl/paths bare-specifier import that the inferred fallback config could not', () => {
+    const { edges, symbols } = runOracleMultiProject({
+      'package.json': '{}',
+      'src/main.ts': `
+        import { URI } from 'vs/base/common/uri';
+        export class Widget extends URI {}
+      `,
+      'src/tsconfig.json': JSON.stringify({
+        compilerOptions: {
+          baseUrl: '.',
+          module: 'amd',
+          paths: { 'vs/*': ['./vs/*'] },
+          skipLibCheck: true,
+          target: 'ES2020',
+        },
+      }),
+      'src/vs/base/common/uri.ts': 'export class URI {}',
+    });
+
+    const uri = symbols.find((s) => s.kind === 'Class' && s.name === 'URI');
+    expect(uri).toBeDefined();
+
+    const extendsEdges = edgesOfType(edges, 'EXT***REMOVED***S');
+    const edge = extendsEdges.find((e) => e.fromLocalId === 'Widget');
+    expect(edge).toBeDefined();
+    // Before F17, `src/` had no project of its own, fell back to inferred
+    // compiler options with no `baseUrl`/`paths`, and the bare specifier
+    // 'vs/base/common/uri' was unresolvable — this would be undefined.
+    expect(edge?.targetLocalId).toBe(uri?.localId);
   });
 });
