@@ -23,12 +23,23 @@ import { normalizeGitNexusEdgeType, normalizeGitNexusKind } from '../types';
 
 const PAGE_SIZE = 800; // Keep well under 64KB per page (~80 bytes/row)
 
-/** Run a Cypher query via gitnexus cypher and parse the markdown table into rows. */
-function runCypher(repoPath: string, cypher: string): Array<Record<string, string>> {
+/**
+ * Run a Cypher query via gitnexus cypher and parse the markdown table into rows.
+ *
+ * `--repo` is required once more than one repo is registered globally (`gitnexus
+ * list`) — cwd-based auto-detection only works with a single registered repo, and
+ * silently erroring on every query here would otherwise produce a false "0 nodes,
+ * 0 edges" result rather than a loud failure.
+ */
+function runCypher(
+  repoPath: string,
+  repoName: string,
+  cypher: string
+): Array<Record<string, string>> {
   const escaped = cypher.replace(/"/g, '\\"');
   let raw: string;
   try {
-    raw = execSync(`gitnexus cypher "${escaped}"`, {
+    raw = execSync(`gitnexus cypher -r "${repoName}" "${escaped}"`, {
       cwd: repoPath,
       maxBuffer: 1024 * 1024 * 1024,
       encoding: 'utf8',
@@ -63,13 +74,17 @@ function runCypher(repoPath: string, cypher: string): Array<Record<string, strin
 }
 
 /** Run a Cypher query with paging, accumulating all rows. */
-function runCypherPaged(repoPath: string, baseCypher: string): Array<Record<string, string>> {
+function runCypherPaged(
+  repoPath: string,
+  repoName: string,
+  baseCypher: string
+): Array<Record<string, string>> {
   const allRows: Array<Record<string, string>> = [];
   let skip = 0;
   // If the base query has a RETURN clause, inject SKIP/LIMIT before any ORDER BY
   while (true) {
     const paged = `${baseCypher} SKIP ${skip} LIMIT ${PAGE_SIZE}`;
-    const rows = runCypher(repoPath, paged);
+    const rows = runCypher(repoPath, repoName, paged);
     if (rows.length === 0) {
       break;
     }
@@ -113,6 +128,8 @@ function parseMarkdownTable(md: string): Array<Record<string, string>> {
 
 export interface GitNexusAdapterOptions {
   outDir: string;
+  /** Name as registered with `gitnexus list` — required to disambiguate once more than one repo is indexed. */
+  repoName: string;
   repoPath: string;
   useCache?: boolean;
 }
@@ -162,7 +179,7 @@ export async function runGitNexusAdapter(opts: GitNexusAdapterOptions): Promise<
   for (const label of NODE_LABELS) {
     console.log(`[gitnexus] Dumping ${label} nodes...`);
     const cypher = `MATCH (n:${label}) RETURN n.id AS id, n.name AS name, n.filePath AS filePath, n.startLine AS startLine, n.endLine AS endLine, '${label}' AS label`;
-    const rows = runCypherPaged(opts.repoPath, cypher);
+    const rows = runCypherPaged(opts.repoPath, opts.repoName, cypher);
     for (const r of rows) {
       if (!(r.id && r.name)) {
         continue;
@@ -187,6 +204,7 @@ export async function runGitNexusAdapter(opts: GitNexusAdapterOptions): Promise<
   console.log('[gitnexus] Dumping File nodes...');
   const fileRows = runCypherPaged(
     opts.repoPath,
+    opts.repoName,
     `MATCH (n:File) RETURN n.id AS id, n.name AS name, n.filePath AS filePath, '${'File'}' AS label`
   );
   for (const r of fileRows) {
@@ -212,7 +230,7 @@ export async function runGitNexusAdapter(opts: GitNexusAdapterOptions): Promise<
   for (const rawType of EDGE_TYPES) {
     console.log(`[gitnexus] Dumping ${rawType} edges...`);
     const cypher = `MATCH (a)-[e:CodeRelation]->(b) WHERE e.type='${rawType}' RETURN a.id AS fromId, e.type AS type, e.confidence AS confidence, b.id AS toId, b.name AS toName`;
-    const rows = runCypherPaged(opts.repoPath, cypher);
+    const rows = runCypherPaged(opts.repoPath, opts.repoName, cypher);
     for (const r of rows) {
       if (!(r.fromId && r.toId)) {
         continue;

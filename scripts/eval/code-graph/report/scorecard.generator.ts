@@ -39,6 +39,10 @@ export interface ScorecardInput {
   graphs: Record<string, ToolGraph>;
   /** Fraction of oracle edges with type-checker-resolved targets. */
   oracleResolvedRate?: number;
+  /** e.g. "BabylonJS/Babylon.js" or "microsoft/vscode" — used in the title and setup section. */
+  repoLabel: string;
+  /** e.g. "~8,400 files, ~80,000 symbols" — used in the setup section, next to `repoLabel`. */
+  repoStats: string;
   /** F10 — oracle CALLS counts by resolution tier (symbol/signature/property/optional-chain-stripped/unresolved). */
   resolutionTiers?: Record<string, number>;
 }
@@ -145,7 +149,7 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('# Code-Graph Eval — Scorecard (v2)');
   lines.push('');
   lines.push(
-    `_Generated ${input.generatedAt} · repo: BabylonJS/Babylon.js @ \`${input.commitSha}\` · tools: ${toolNames.join(', ')} · oracle: **type-checker-backed**_`
+    `_Generated ${input.generatedAt} · repo: ${input.repoLabel} @ \`${input.commitSha}\` · tools: ${toolNames.join(', ')} · oracle: **type-checker-backed**_`
   );
   lines.push('');
   lines.push('---');
@@ -159,7 +163,7 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('### The setup');
   lines.push('');
   lines.push(
-    '- **Repo:** BabylonJS/Babylon.js — a large TypeScript codebase (~8,400 files, ~80,000 symbols). All tools indexed the same commit.'
+    `- **Repo:** ${input.repoLabel} — ${input.repoStats}. All tools indexed the same commit.`
   );
   lines.push(
     "- **The oracle (ground truth):** The TypeScript compiler **with type checking**. Unlike a parse-only oracle, this can resolve which specific method a call targets, which class is extended, which symbol is imported. It is the language's own semantics — neutral, not favoring any tool."
@@ -207,7 +211,16 @@ export function generateScorecard(input: ScorecardInput): string {
     '| **Unscoreable (excluded)** | Oracle rows dropped before scoring because the target is knowably outside the repo, or unresolvable even to the compiler after every fallback tried. Never counted as FN — recall is computed over the achievable denominator only (F9). |'
   );
   lines.push(
+    "| **Unscoreable (matched)** | Tool edges that would otherwise be a false positive, but matched an unscoreable oracle row instead — the oracle couldn't verify the target, so the claim can't be judged either way. Excluded from precision AND recall (F18). |"
+  );
+  lines.push(
+    '| **Duplicate rows (collapsed)** | Tool node rows collapsed as duplicates of an already-seen (path, name, kind, line) row before matching. A tool emitting the same symbol twice is a modelling note, not a wrong answer (F22). |'
+  );
+  lines.push(
     "| **Site coverage** | Of a matched relationship's original call/reference sites (before deduplication), what fraction the tool's edges account for. A tool that emits one edge per unique pair rather than one per site scores full recall but partial site coverage — informational, not a penalty (F9). |"
+  );
+  lines.push(
+    '| **Abstention** | A self-loop edge (`fromId === toId`) marked `resolved: false` — "relationship detected, target not asserted", not a claim. Excluded from the headline `Edges (asserted)` count and from precision (F23). |'
   );
   lines.push('');
   lines.push("### What's different from v1");
@@ -234,25 +247,36 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('## Headline');
   lines.push('');
   lines.push(
-    '| Tool | Nodes | Edges | Node F1 | Edge F1 | CALLS precision | CALLS recall | CALLS target accuracy |'
+    '| Tool | Nodes | Edges (asserted) | Abstentions | Node F1 | Edge F1 | CALLS precision | CALLS recall | CALLS target accuracy |'
   );
   lines.push(
-    '|------|-------|-------|---------|---------|------------------|--------------|----------------------|'
+    '|------|-------|-------------------|-------------|---------|---------|------------------|--------------|----------------------|'
   );
   lines.push(
-    '| | _Symbols extracted_ | _Comparable edges_ | _Symbol accuracy_ | _Edge accuracy_ | _Of calls claimed, how many are real?_ | _Of real calls, how many found?_ | _Of correct calls, how many point to the exact target?_ |'
+    '| | _Symbols extracted_ | _Comparable edges that assert a target_ | _Self-loops with no target asserted_ | _Symbol accuracy_ | _Edge accuracy_ | _Of calls claimed, how many are real?_ | _Of real calls, how many found?_ | _Of correct calls, how many point to the exact target?_ |'
   );
   for (const name of toolNames) {
     const g = input.graphs[name];
     const d2 = input.d2[name];
     const calls = d2.edges.byType.CALLS;
+    // F23 — a self-loop with `resolved: false` is "relationship detected,
+    // target not asserted" (see edge-adjudicator.ts's abstention rule), not a
+    // claim. Counting it in the headline "Edges" total makes a tool that
+    // abstains heavily (e.g. Vyazen on vscode: 246,813 of these) read as if
+    // it produced more assertions than a tool that doesn't abstain at all.
+    const abstentions = g.edges.filter((e) => e.fromId === e.toId && e.resolved === false).length;
+    const asserted = g.meta.edgeCount - abstentions;
     lines.push(
-      `| **${name}** | ${num(g.meta.nodeCount)} | ${num(g.meta.edgeCount)} | ${pct(d2.nodes.overall.f1)} | ${pct(d2.edges.overall.f1)} | ${calls ? fmtPrecision(calls) : '—'} | ${calls ? fmtRecall(calls) : '—'} | ${calls ? pct(calls.targetAccuracy) : '—'} |`
+      `| **${name}** | ${num(g.meta.nodeCount)} | ${num(asserted)} | ${num(abstentions)} | ${pct(d2.nodes.overall.f1)} | ${pct(d2.edges.overall.f1)} | ${calls ? fmtPrecision(calls) : '—'} | ${calls ? fmtRecall(calls) : '—'} | ${calls ? pct(calls.targetAccuracy) : '—'} |`
     );
   }
   lines.push('');
   lines.push(
     '> **Target accuracy** is the key new metric. It answers: "if a coding agent follows this edge, does it land on the right code?" A tool can have high precision (the relationship exists) but low target accuracy (it points to the wrong overload or the wrong file).'
+  );
+  lines.push('');
+  lines.push(
+    "> **Abstentions** (F23) are self-loop edges the tool marks `resolved: false` — an explicit \"relationship detected, target not asserted\", not a claim the oracle can confirm or reject. Only Vyazen currently emits these (see caveats); every other tool's abstention count is 0 by construction, not because it never fails to resolve a target. Note this headline count can exceed the `Unresolved abstentions` figure reported per tool in D2 below — D2's figure is scoped to the edges that reach the main comparable-edge adjudication, and F6's IMPORTS→File partition removes a large share of self-loop IMPORTS abstentions before adjudication runs at all."
   );
   lines.push('');
   lines.push('---');
@@ -289,7 +313,9 @@ export function generateScorecard(input: ScorecardInput): string {
       `| **Overall** | ${num(d2.nodes.overall.tp)} | ${num(d2.nodes.overall.fp)} | ${num(d2.nodes.overall.fn)} | ${fmtPrecision(d2.nodes.overall)} | ${fmtRecall(d2.nodes.overall)} | ${fmtF1(d2.nodes.overall)} |`
     );
     lines.push('');
-    lines.push(`**Macro F1:** ${pct(d2.nodes.macroF1)}`);
+    lines.push(
+      `**Macro F1:** ${pct(d2.nodes.macroF1)} · **Duplicate rows (collapsed, F22):** ${num(d2.nodes.duplicateNodesCollapsed)}`
+    );
     lines.push('');
 
     // F2: kind-labelling accuracy — separate from symbol identity above. A
@@ -343,6 +369,9 @@ export function generateScorecard(input: ScorecardInput): string {
     '| Unscoreable (excl.) | Oracle rows for this type dropped before scoring — target knowably external, or unresolvable even to the compiler (F9). Never folded into FN; this column IS the recall ceiling context: `recall` here is already computed over the achievable denominator. |'
   );
   lines.push(
+    "| Unscoreable (matched) | Tool edges of this type that matched an unscoreable oracle row instead of being charged FP (F18) — the oracle couldn't verify the target either way. |"
+  );
+  lines.push(
     "| Site coverage | Of the deduped relationship's original call/reference sites, what fraction the tool's matched edges account for (F9). A tool that emits one edge per unique pair — not one per site — scores full recall but partial site coverage; that is a modelling-granularity note, not a penalty. |"
   );
   lines.push('');
@@ -352,21 +381,21 @@ export function generateScorecard(input: ScorecardInput): string {
     lines.push(`#### ${name}`);
     lines.push('');
     lines.push(
-      '| Edge | TP | FP | FN | Precision | Recall | F1 | Target confirmed | Name only | Target accuracy | Unscoreable (excl.) | Site coverage |'
+      '| Edge | TP | FP | FN | Precision | Recall | F1 | Target confirmed | Name only | Target accuracy | Unscoreable (excl.) | Unscoreable (matched) | Site coverage |'
     );
     lines.push(
-      '|------|----|----|----|-----------|--------|------|-------------------|-----------|-----------------|----------------------|---------------|'
+      '|------|----|----|----|-----------|--------|------|-------------------|-----------|-----------------|----------------------|-----------------------|---------------|'
     );
     for (const [type, m] of Object.entries(d2.edges.byType)) {
       if (!m || (m.tp + m.fp + m.fn === 0 && !m.onlyFileGranularity)) {
         continue;
       }
       lines.push(
-        `| ${type} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtGranularityAware(fmtPrecision(m), m.onlyFileGranularity)} | ${fmtGranularityAware(fmtRecallOnScoreable(m), m.onlyFileGranularity)} | ${fmtGranularityAware(fmtF1(m), m.onlyFileGranularity)} | ${num(m.targetConfirmed)} | ${num(m.nameOnlyConfirmed)} | ${pct(m.targetAccuracy)} | ${num(m.unscoreableExcluded)} | ${pct(m.siteCoverage)} |`
+        `| ${type} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtGranularityAware(fmtPrecision(m), m.onlyFileGranularity)} | ${fmtGranularityAware(fmtRecallOnScoreable(m), m.onlyFileGranularity)} | ${fmtGranularityAware(fmtF1(m), m.onlyFileGranularity)} | ${num(m.targetConfirmed)} | ${num(m.nameOnlyConfirmed)} | ${pct(m.targetAccuracy)} | ${num(m.unscoreableExcluded)} | ${num(m.unscoreableMatched)} | ${pct(m.siteCoverage)} |`
       );
     }
     lines.push(
-      `| **Overall** | ${num(d2.edges.overall.tp)} | ${num(d2.edges.overall.fp)} | ${num(d2.edges.overall.fn)} | ${fmtPrecision(d2.edges.overall)} | ${fmtRecall(d2.edges.overall)} | ${fmtF1(d2.edges.overall)} | — | — | **${pct(d2.edges.targetAccuracy)}** | — | — |`
+      `| **Overall** | ${num(d2.edges.overall.tp)} | ${num(d2.edges.overall.fp)} | ${num(d2.edges.overall.fn)} | ${fmtPrecision(d2.edges.overall)} | ${fmtRecall(d2.edges.overall)} | ${fmtF1(d2.edges.overall)} | — | — | **${pct(d2.edges.targetAccuracy)}** | — | — | — |`
     );
     lines.push('');
     lines.push(
@@ -382,12 +411,20 @@ export function generateScorecard(input: ScorecardInput): string {
     '**What this measures:** IMPORTS scored at module-dependency granularity — "does file X depend on file Y?" Every tool can compete at this level, regardless of whether it models imports at File→Symbol granularity (an advantage on the symbol-level table above) or only File→File.'
   );
   lines.push('');
-  lines.push('| Tool | Tool pairs | Oracle pairs | TP | FP | FN | Precision | Recall |');
-  lines.push('|------|------------|--------------|----|----|----|-----------|--------|');
+  lines.push(
+    "**Unscoreable (excl., F19):** a source file's unmatched tool pairs are excused up to its count of oracle-unresolved imports (the compiler couldn't say which file those imports target, so a tool's guess can't be confirmed or refuted) — excluded from FP; the rest are genuine FP."
+  );
+  lines.push('');
+  lines.push(
+    '| Tool | Tool pairs | Oracle pairs | TP | FP | FN | Precision | Recall | Unscoreable (excl.) |'
+  );
+  lines.push(
+    '|------|------------|--------------|----|----|----|-----------|--------|----------------------|'
+  );
   for (const name of toolNames) {
     const m = input.d2[name].edges.importsModuleLevel;
     lines.push(
-      `| ${name} | ${num(m.toolPairs)} | ${num(m.oraclePairs)} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecall(m)} |`
+      `| ${name} | ${num(m.toolPairs)} | ${num(m.oraclePairs)} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecall(m)} | ${num(m.unscoreableExcluded)} |`
     );
   }
   lines.push('');
@@ -420,6 +457,23 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('|------|----|----|----|-----------|--------|------|');
   for (const name of toolNames) {
     const m = input.d2[name].edges.usesTypeFromAgnostic;
+    lines.push(
+      `| ${name} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecall(m)} | ${fmtF1(m)} |`
+    );
+  }
+  lines.push('');
+
+  // ── Phase 5: METHOD_OVERRIDES — from-side-agnostic ──────────────────────────
+  lines.push('### METHOD_OVERRIDES — from-side-agnostic');
+  lines.push('');
+  lines.push(
+    "**What this measures:** the strict METHOD_OVERRIDES table (extended edge types, below) attributes each override to a specific container — matching the oracle's own convention (the overriding Method) exactly. GitNexus attributes the same relationship to the containing Class instead, which forces 0 TP by construction in the strict table — an attribution-convention mismatch, not a quality result. This table drops that requirement: per (containing class, base target) pair, was the override found at all, regardless of which container each side attributes it to."
+  );
+  lines.push('');
+  lines.push('| Tool | TP | FP | FN | Precision | Recall | F1 |');
+  lines.push('|------|----|----|----|-----------|--------|------|');
+  for (const name of toolNames) {
+    const m = input.d2[name].edges.methodOverridesFromAgnostic;
     lines.push(
       `| ${name} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecall(m)} | ${fmtF1(m)} |`
     );
@@ -460,20 +514,24 @@ export function generateScorecard(input: ScorecardInput): string {
     '**What this measures:** Vyazen uses the TS compiler to resolve edges — it knows "method A calls method B specifically", not just "A calls something named B". The question: of Vyazen\'s resolved edges, how many does the competitor also find, and how many point to the right target?'
   );
   lines.push('');
+  lines.push(
+    "**Note (F24):** this table adjudicates the same partitioned edge population as the D2 fidelity table above (File-granularity IMPORTS and member-level IMPLEMENTS are scored in their own tables, not here), so Precision here matches D2's Precision for the same tool and edge type — they used to diverge because D1 adjudicated the unpartitioned edge set. `Tool claimed` is still the tool's *raw* count of that edge type, including edges routed elsewhere by the partition and self-loop abstentions — it is not the Precision denominator (`TP + FP`)."
+  );
+  lines.push('');
 
   for (const name of toolNames) {
     const d1 = input.d1[name];
     lines.push(`### ${name}`);
     lines.push('');
     lines.push(
-      '| Edge | Tool claimed | TP (oracle) | FP (rejected) | FN (missed) | Precision | Oracle recall | Target confirmed | Unscoreable (excl.) | Site coverage |'
+      '| Edge | Tool claimed | TP (oracle) | FP (rejected) | FN (missed) | Precision | Oracle recall | Target confirmed | Unscoreable (excl.) | Unscoreable (matched) | Site coverage |'
     );
     lines.push(
-      '|------|--------------|-------------|---------------|-------------|-----------|---------------|-------------------|----------------------|---------------|'
+      '|------|--------------|-------------|---------------|-------------|-----------|---------------|-------------------|----------------------|-----------------------|---------------|'
     );
     for (const m of d1.perType) {
       lines.push(
-        `| ${m.edgeType} | ${num(m.toolClaimed)} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecallOnScoreable(m)} | ${num(m.targetConfirmed)} | ${num(m.unscoreableExcluded)} | ${pct(m.siteCoverage)} |`
+        `| ${m.edgeType} | ${num(m.toolClaimed)} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecallOnScoreable(m)} | ${num(m.targetConfirmed)} | ${num(m.unscoreableExcluded)} | ${num(m.unscoreableMatched)} | ${pct(m.siteCoverage)} |`
       );
     }
     lines.push('');
@@ -552,10 +610,10 @@ export function generateScorecard(input: ScorecardInput): string {
   );
   lines.push('');
   lines.push(
-    '| Edge type | Tool | TP | FP | FN | Precision | Recall | F1 | Unscoreable (excl.) | Site coverage |'
+    '| Edge type | Tool | TP | FP | FN | Precision | Recall | F1 | Unscoreable (excl.) | Unscoreable (matched) | Site coverage |'
   );
   lines.push(
-    '|-----------|------|----|----|----|-----------|--------|------|----------------------|---------------|'
+    '|-----------|------|----|----|----|-----------|--------|------|----------------------|-----------------------|---------------|'
   );
   for (const name of toolNames) {
     const ext = input.d2[name].edges.extendedByType;
@@ -568,7 +626,7 @@ export function generateScorecard(input: ScorecardInput): string {
       // header ("evaluated on the accuracy of what it emits") by printing a
       // fabricated zero for types a tool simply doesn't produce.
       lines.push(
-        `| ${type} | ${name} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecallOnScoreable(m)} | ${fmtF1(m)} | ${num(m.unscoreableExcluded)} | ${pct(m.siteCoverage)} |`
+        `| ${type} | ${name} | ${num(m.tp)} | ${num(m.fp)} | ${num(m.fn)} | ${fmtPrecision(m)} | ${fmtRecallOnScoreable(m)} | ${fmtF1(m)} | ${num(m.unscoreableExcluded)} | ${num(m.unscoreableMatched)} | ${pct(m.siteCoverage)} |`
       );
     }
   }

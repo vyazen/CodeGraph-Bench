@@ -4,13 +4,19 @@
  * Code-Graph Eval Runner (v2) — type-checker oracle + target accuracy.
  *
  * Usage:
- *   bun run scripts/eval/code-graph/runner.ts                 # full run
- *   bun run scripts/eval/code-graph/runner.ts --use-cache      # reuse cached JSONL
- *   bun run scripts/eval/code-graph/runner.ts --skip-oracle    # skip oracle (use cache)
- *   bun run scripts/eval/code-graph/runner.ts --skip-vyazen    # skip Vyazen dump
- *   bun run scripts/eval/code-graph/runner.ts --skip-gitnexus  # skip GitNexus dump
+ *   bun run scripts/eval/code-graph/runner.ts                       # full run (babylonjs, default target)
+ *   bun run scripts/eval/code-graph/runner.ts --target=vscode        # full run against vscode
+ *   bun run scripts/eval/code-graph/runner.ts --use-cache            # reuse cached JSONL
+ *   bun run scripts/eval/code-graph/runner.ts --skip-oracle          # skip oracle (use cache)
+ *   bun run scripts/eval/code-graph/runner.ts --skip-vyazen          # skip Vyazen dump
+ *   bun run scripts/eval/code-graph/runner.ts --skip-gitnexus        # skip GitNexus dump
  *
- * Produces CODE_GRAPH_EVAL_SCORECARD.md.
+ * Target selection: `--target=<name>` > `EVAL_TARGET` env var > `VYAZEN_EVAL_TARGET`
+ * (legacy, adapter-only) env var > 'babylonjs'. Each target has its own repo checkout
+ * path, pinned commit, data-cache directory and scorecard output file (VSCODE_CODE_GRAPH_EVAL_PLAN.md §4)
+ * so a vscode run never clobbers a babylonjs one.
+ *
+ * Produces CODE_GRAPH_EVAL_SCORECARD.md (babylonjs) or CODE_GRAPH_EVAL_SCORECARD_VSCODE.md (vscode).
  */
 
 import { readFileSync } from 'node:fs';
@@ -18,29 +24,133 @@ import { join } from 'node:path';
 import { runGitNexusAdapter } from './adapters/gitnexus.adapter';
 import { runGraphifyAdapter } from './adapters/graphify.adapter';
 import { runPotpieAdapter } from './adapters/potpie.adapter';
-import { runVyazenAdapter } from './adapters/vyazen.adapter';
+import { runVyazenAdapter, VYAZEN_TARGETS, type VyazenTargetName } from './adapters/vyazen.adapter';
+import { discoverProjects, walkRepoFiles } from './oracle/project-discovery';
 import { deriveScoreable, runTypeCheckerOracle } from './oracle/ts-typechecker.oracle';
-import { generateScorecard } from './report/scorecard.generator';
+import { type D3PipelineCost, generateScorecard } from './report/scorecard.generator';
 import { crossToolCoverage, scoreD1 } from './scorers/d1-depth.scorer';
 import { scoreD2 } from './scorers/d2-fidelity.scorer';
 import { scoreD4 } from './scorers/d4-capability.scorer';
 import type { EdgeType, SymbolType, ToolGraph } from './types';
 import { COMPARABLE_EDGE_TYPES, EXT***REMOVED***ED_EDGE_TYPES } from './types';
 
-const DATA_DIR = join(import.meta.dir, 'data');
-const BABYLONJS_PATH = process.env.BABYLONJS_EVAL_PATH;
-const COMMIT_SHA = '4efc0490';
-const POTPIE_REPO_PATH = join(import.meta.dir, '..', 'potpie');
-const POTPIE_NDJSON_PATH = join(import.meta.dir, '..', 'potpie-out', 'graph.ndjson');
+type EvalTargetName = VyazenTargetName;
 
-if (!BABYLONJS_PATH) {
-  console.error(
-    '[runner] BABYLONJS_EVAL_PATH env var is not set. Point it at the BabylonJS checkout (e.g. scripts/eval/babylonjs).'
-  );
-  process.exit(1);
+interface RepoTargetConfig {
+  d3: Record<string, D3PipelineCost>;
+  /** Cache subdirectory under code-graph/ — keeps two targets' caches from colliding (§4). */
+  dataDirName: string;
+  /** Used only if none of `repoPathEnvVars` is set. */
+  defaultRepoPath?: string;
+  /** Appended after the target-agnostic caveats (§4). */
+  extraCaveats: string[];
+  /** Name as registered with `gitnexus list` — required by `gitnexus cypher -r` once more than one repo is indexed. */
+  gitnexusRepoName: string;
+  /** Potpie NDJSON filename under scripts/eval/potpie-out/. */
+  potpieNdjsonName: string;
+  repoLabel: string;
+  /** Filesystem env vars checked in order for the repo checkout path — generic name first, legacy name last. */
+  repoPathEnvVars: string[];
+  repoStats: string;
+  /** Scorecard output filename under scripts/eval/. */
+  scorecardFileName: string;
 }
 
-const args = new Set(process.argv.slice(2));
+const REPO_TARGETS: Record<EvalTargetName, RepoTargetConfig> = {
+  babylonjs: {
+    repoPathEnvVars: ['EVAL_REPO_PATH', 'BABYLONJS_EVAL_PATH'],
+    dataDirName: 'data',
+    scorecardFileName: 'CODE_GRAPH_EVAL_SCORECARD.md',
+    potpieNdjsonName: 'graph.ndjson',
+    gitnexusRepoName: 'Babylon.js',
+    repoLabel: 'BabylonJS/Babylon.js',
+    repoStats: '~8,400 files, ~80,000 symbols',
+    d3: {
+      // Measured manually via `/usr/bin/time -l` during this eval pass (2026-07-26/27) —
+      // not reproduced automatically by this script. Re-measure if re-running D3.
+      GitNexus: {
+        indexSize:
+          '1.04 GB (.gitnexus/, embeddings skipped — 86,920 nodes exceeds the 50k safety cap)',
+        notes: '`gitnexus analyze --embeddings --force`',
+        peakRss: '4.00 GiB',
+        wallClock: '71.8s',
+      },
+      Graphify: {
+        indexSize: '95.6 MB (graphify-out/graph.json)',
+        notes: '`graphify update . --force`, 56,412 nodes / 163,985 raw edges, 1,941 communities',
+        peakRss: '3.03 GiB',
+        wallClock: '149.5s',
+      },
+      Potpie: {
+        indexSize:
+          '169 MiB (potpie-out/graph.ndjson, raw NDJSON — no persisted index; the payload is normally written straight to Neo4j as a 1:1 dump, §2.2)',
+        notes:
+          '`potpie-parse <babylonjs>`, 54,034 nodes / 182,139 raw edges (47,399 CONTAINS + 134,740 REFERENCES). Dramatically lighter than expected (§Phase 3 predicted a 3-4 GiB band matching GitNexus/Graphify) — Rust + rayon-parallel tree-sitter tagging with no scope/type resolution is simply a smaller workload than a resolved-edge or communities-clustering index.',
+        peakRss: '1.03 GiB (maximum resident set size, `/usr/bin/time -l`)',
+        wallClock: '8.1s',
+      },
+      Vyazen: {
+        indexSize: '—',
+        notes:
+          'Live deployment, indexed prior to this eval pass — this run only performed a read-only Cypher export (minutes), not a fresh index build. Not comparable to a cold-start number.',
+        peakRss: '—',
+        wallClock: '—',
+      },
+    },
+    extraCaveats: [],
+  },
+  vscode: {
+    repoPathEnvVars: ['EVAL_REPO_PATH', 'VSCODE_EVAL_PATH'],
+    defaultRepoPath: join(import.meta.dir, '..', 'vscode'),
+    dataDirName: 'data-vscode',
+    scorecardFileName: 'CODE_GRAPH_EVAL_SCORECARD_VSCODE.md',
+    potpieNdjsonName: 'vscode-graph.ndjson',
+    gitnexusRepoName: 'vscode',
+    repoLabel: 'microsoft/vscode',
+    repoStats:
+      "5,108 TS/JS files / 7,326 total files (Vyazen's own parse stage stage: 146,548 symbols / 8 parse errors)",
+    d3: {
+      // Measured directly against the pinned commit's checkout during Phase 3
+      // (VSCODE_CODE_GRAPH_EVAL_PLAN.md §3) — index sizes re-measured on disk
+      // 2026-07-31 (`du`), wall-clock/RSS as recorded by each tool's own run.
+      GitNexus: {
+        indexSize:
+          '1.36 GiB (.gitnexus/, embeddings skipped — 132,925 nodes exceeds the 50k safety cap, same as BabylonJS)',
+        notes: '`gitnexus analyze --embeddings --force`; 132,925 nodes / 522,198 edges',
+        peakRss: '5.57 GiB',
+        wallClock: '146.3s',
+      },
+      Graphify: {
+        indexSize: '186 MiB (graphify-out/graph.json)',
+        notes:
+          '`graphify update . --force`, `GRAPHIFY_MAX_GRAPH_BYTES=2147483648` (precautionary — actual output well under even the default 512 MiB cap); 94,260 nodes / 338,945 raw edges',
+        peakRss: '3.93 GiB',
+        wallClock: '140.3s',
+      },
+      Potpie: {
+        indexSize:
+          '436 MiB (potpie-out/vscode-graph.ndjson, raw NDJSON — no persisted index; written straight to Neo4j as a 1:1 dump in the legacy stack, §2.2)',
+        notes:
+          '`potpie-parse vscode` via the existing scripts/eval/potpie/.venv (no cargo rebuild needed — potpie-parse was already installed from the BabylonJS setup); 85,658 nodes / 320,001 raw edges',
+        peakRss: '1.74 GiB',
+        wallClock: '6.8s',
+      },
+      Vyazen: {
+        indexSize: '—',
+        notes:
+          "Local cold-build on this laptop (VYAZEN_LOCAL_REINDEX_AND_RESCORE_PLAN.md §2) — a full `parse-pipeline` run of structural + parse stage + link stage against the pinned commit via `bun run cli parse-pipeline`, timed with `/usr/bin/time -l`. Comparable to the other tools' laptop measurements (same machine class), unlike prior passes where Vyazen numbers were a read-only export off an already-indexed deployment. Excludes ENRICH_GRAPH/INDEX_REPO_ZOEKT/GENERATE_WIKI/EMBED_WIKI — those are sibling pipeline stages this run did not execute, not part of the D3 cost being measured here.",
+        peakRss: '2.37 GiB',
+        wallClock: '69.9s',
+      },
+    },
+    extraCaveats: [
+      "**Vyazen's pipeline linked 120/120 units on this commit** (parse stage: 146,548 symbols / 8 parse errors — reproduces the pre-fix figure exactly, confirming V1/V2 didn't leak into node extraction; link stage: 120/120 units linked, 0 skipped/errored, 446,855 resolved edges / 49,417 unresolved across CALLS/IMPORTS/EXT***REMOVED***S/IMPLEMENTS/USES_TYPE) — measured from a local `parse-pipeline` cold-build run (VYAZEN_LOCAL_REINDEX_AND_RESCORE_PLAN.md §2), not the backend Postgres `repo_pipeline_processes` table used by prior passes. The unit count is 12 higher than the pre-fix 108 — the exact `project detector` orphan-tsconfig delta V1 targets — and every unit now links.",
+    ],
+  },
+};
+
+const argv = process.argv.slice(2);
+const args = new Set(argv);
 const useCache = args.has('--use-cache');
 const skipOracle = args.has('--skip-oracle');
 const skipVyazen = args.has('--skip-vyazen');
@@ -48,10 +158,45 @@ const skipGitnexus = args.has('--skip-gitnexus');
 const skipGraphify = args.has('--skip-graphify');
 const skipPotpie = args.has('--skip-potpie');
 
+const TARGET_NAME: EvalTargetName = (() => {
+  const fromArg = argv.find((a) => a.startsWith('--target='))?.split('=')[1];
+  const name = fromArg ?? process.env.EVAL_TARGET ?? process.env.VYAZEN_EVAL_TARGET ?? 'babylonjs';
+  if (name !== 'babylonjs' && name !== 'vscode') {
+    console.error(`[runner] Unknown --target "${name}" — expected one of: babylonjs, vscode`);
+    process.exit(1);
+  }
+  return name as EvalTargetName;
+})();
+
+const TARGET_CONFIG = REPO_TARGETS[TARGET_NAME];
+const DATA_DIR = join(import.meta.dir, TARGET_CONFIG.dataDirName);
+const REPO_PATH_MAYBE =
+  TARGET_CONFIG.repoPathEnvVars.map((v) => process.env[v]).find(Boolean) ??
+  TARGET_CONFIG.defaultRepoPath;
+const COMMIT_SHA_OVERRIDE = argv.find((a) => a.startsWith('--commit-sha='))?.split('=')[1];
+const COMMIT_SHA = COMMIT_SHA_OVERRIDE ?? VYAZEN_TARGETS[TARGET_NAME].commitSha;
+const POTPIE_REPO_PATH = join(import.meta.dir, '..', 'potpie');
+const POTPIE_NDJSON_PATH = join(
+  import.meta.dir,
+  '..',
+  'potpie-out',
+  TARGET_CONFIG.potpieNdjsonName
+);
+
+if (!REPO_PATH_MAYBE) {
+  console.error(
+    `[runner] No repo path set for target "${TARGET_NAME}" — set ${TARGET_CONFIG.repoPathEnvVars[0]} ` +
+      `(or one of: ${TARGET_CONFIG.repoPathEnvVars.slice(1).join(', ')}).`
+  );
+  process.exit(1);
+}
+const REPO_PATH: string = REPO_PATH_MAYBE;
+
 async function main(): Promise<void> {
   console.log('=== Code-Graph Eval Runner (v2 — type-checker oracle) ===');
+  console.log(`Target: ${TARGET_NAME} (commit ${COMMIT_SHA})`);
   console.log(`Data dir: ${DATA_DIR}`);
-  console.log(`BabylonJS: ${BABYLONJS_PATH}`);
+  console.log(`Repo: ${REPO_PATH}`);
   console.log(
     `Flags: useCache=${useCache} skipOracle=${skipOracle} skipVyazen=${skipVyazen} skipGitnexus=${skipGitnexus} skipGraphify=${skipGraphify} skipPotpie=${skipPotpie}`
   );
@@ -64,7 +209,7 @@ async function main(): Promise<void> {
   } else {
     console.log('[runner] Phase: Type-checker oracle');
     oracle = await runTypeCheckerOracle({
-      repoPath: BABYLONJS_PATH,
+      repoPath: REPO_PATH,
       outDir: join(DATA_DIR, 'oracle'),
       useCache,
     });
@@ -104,6 +249,7 @@ async function main(): Promise<void> {
       vyazenGraph = await runVyazenAdapter({
         outDir: join(DATA_DIR, 'vyazen'),
         useCache,
+        target: TARGET_NAME,
       });
     } catch (err) {
       console.error(`[runner] Vyazen adapter failed: ${err}`);
@@ -117,7 +263,8 @@ async function main(): Promise<void> {
     try {
       gitnexusGraph = await runGitNexusAdapter({
         outDir: join(DATA_DIR, 'gitnexus'),
-        repoPath: BABYLONJS_PATH,
+        repoPath: REPO_PATH,
+        repoName: TARGET_CONFIG.gitnexusRepoName,
         useCache,
       });
     } catch (err) {
@@ -132,7 +279,7 @@ async function main(): Promise<void> {
     try {
       graphifyGraph = await runGraphifyAdapter({
         outDir: join(DATA_DIR, 'graphify'),
-        repoPath: BABYLONJS_PATH,
+        repoPath: REPO_PATH,
         useCache,
       });
     } catch (err) {
@@ -270,6 +417,42 @@ async function main(): Promise<void> {
 
   // ── 5. Generate scorecard ──────────────────────────────────────────────────
   console.log('\n[runner] Phase: Scorecard generation');
+
+  // §4/Appendix A: replaces the old hardcoded "Single repo" claim, which was
+  // factually wrong even for BabylonJS (83 package.jsons; it worked because
+  // one root tsconfig's globs happened to cover the whole tree). Computed from
+  // this run's own project discovery — cheap (filesystem walk only, no
+  // ts.Program) — rather than a target-specific literal that drifts from
+  // whatever the oracle actually saw.
+  const oracleFiles = walkRepoFiles(REPO_PATH);
+  const oracleProjects = discoverProjects(oracleFiles);
+  const oracleProjectsWithTsconfig = oracleProjects.filter((p) => p.tsconfigPath).length;
+  const monorepoCaveat =
+    `**${oracleProjects.length} project(s) detected** by the oracle's project-discovery rules — ` +
+    'one per `package.json` (TS-capable iff a `tsconfig*.json` sits alongside it), plus, since F17, one per ' +
+    "`tsconfig*.json` directory that has **no** adjacent `package.json` (e.g. this repo's `src/`, whose " +
+    '`src/tsconfig.json` sets `baseUrl`/`paths`/`module: amd`) — ' +
+    `${oracleProjectsWithTsconfig} with their own tsconfig, ${oracleProjects.length - oracleProjectsWithTsconfig} ` +
+    'falling back to inferred compiler options. Each project is analyzed by its own `ts.Program`. ' +
+    "**Vyazen's own `project detector` now mirrors this rule (V1, VYAZEN_TSCONFIG_PROJECT_DETECTION_FIX_PLAN.md)** " +
+    '— it previously had no second rule and so never selected a tsconfig sitting in a source directory with no ' +
+    "`package.json` next to it, which used to make the oracle blind in exactly the place Vyazen's own project " +
+    'detection was blind, letting a harness defect masquerade as a tool advantage (before F17: 94.3% of oracle ' +
+    "IMPORTS rows had no resolvable target; after: 4.6%, in line with BabylonJS's 11.3%). The oracle's job is the " +
+    "language's real semantics, not a copy of whatever detection gap the tool under test happens to have — V1 " +
+    'closing that gap in the tool itself is the fix landing correctly, not the oracle and tool re-converging on a ' +
+    'shared blind spot (VSCODE_ORACLE_RESOLUTION_FIX_PLAN.md §0/F17).';
+  const vyazenOwnResolutionCaveat =
+    "**Vyazen's own resolution rate on this repo was a Vyazen finding, now fixed.** Its pipeline's `resolved: " +
+    'true` rate used to collapse on vscode for the same reason the pre-F17 oracle did — `project detector` ' +
+    'never selected `src/tsconfig.json`, so most of `src/**` linked with inferred compiler options instead of the ' +
+    'real `baseUrl`/`paths` config. V1/V2 (VYAZEN_TSCONFIG_PROJECT_DETECTION_FIX_PLAN.md) fix this at the ' +
+    'source — measured via a local cold-build run (VYAZEN_LOCAL_REINDEX_AND_RESCORE_PLAN.md §3, `MATCH ' +
+    '()-[e:TYPE]->() WHERE e.repoId=$repoId RETURN e.resolved, count(*)`): IMPORTS 5.4%→97.1%, CALLS 25.6%→72.5%, ' +
+    'EXT***REMOVED***S 30.7%→72.4%, IMPLEMENTS 29.1%→98.5%, USES_TYPE 33.4%→87.4% — landing at or above the BabylonJS ' +
+    'ceiling (90.1% / 66.9% / 83.7% / 99.8% / 89.2%) that motivated the fix. Double-indexed into a clean Neo4j to ' +
+    'confirm determinism: resolved-edge counts matched exactly (0% spread) across both runs.';
+
   const scorecard = generateScorecard({
     caveats: [
       "**TypeScript is Vyazen's best case.**   A TS-only result overstates the general moat.",
@@ -279,7 +462,10 @@ async function main(): Promise<void> {
       '**Extended edge types scored separately.** USES_TYPE (Vyazen), ACCESSES + METHOD_OVERRIDES (GitNexus) are scored per-tool against the oracle — each tool on what it produces.',
       '**`USES_TYPE` still excluded from head-to-head** — no GitNexus equivalent for the combined score.',
       '**Node identity matching** uses (path, name, startLine±2) per §5. Overloads resolved by nearest line. Anonymous/computed names skipped.',
-      '**Single repo.** BabylonJS is one large, mature, TS-heavy codebase. Does not generalize to small repos, monorepos, or polyglot.',
+      monorepoCaveat,
+      vyazenOwnResolutionCaveat,
+      "**File ownership: deepest matching project owns a file.** The oracle assigns each file to the project with the longest `rootPath` prefix match, so every symbol/edge is emitted exactly once — asserted at runtime; a file walked by more than one project throws rather than silently duplicating. This is a deliberate divergence from Vyazen's own overlapping prefix scoping (`Project` nodes matched via `STARTS WITH ''` — the root project owns every file, sub-projects own their subtree again): the oracle has a ground-truth uniqueness requirement Vyazen's per-project graph-write step doesn't (VSCODE_CODE_GRAPH_EVAL_PLAN.md §1.2).",
+      "**`.d.ts` edge-fidelity asymmetry.** The oracle's F3 policy includes declaration files in edge extraction; Vyazen's edge resolver skips them outright (`if (!sourceFile || sourceFile.isDeclarationFile) continue`). Node-fidelity is unaffected — parse stage (SWC) still emits `.d.ts` nodes tools can match — but the oracle can hold `.d.ts`-sourced edges no tool's resolution stage had a chance to produce. Larger on repos that ship more declaration files (VSCODE_CODE_GRAPH_EVAL_PLAN.md §1.3).",
       `**Graphify ran via the public \`graphify update\` command (v${process.env.GRAPHIFY_VERSION ?? '0.9.27'})** — deterministic tree-sitter extraction, no LLM. \`--mode deep\` (AST + semantic LLM) was deliberately not scored: its LLM-minted nodes aren't comparable to tree-sitter edges.`,
       "**Graphify's `graph.json` carries no symbol-kind field for TS/JS** (class/interface/enum/alias/property/variable are indistinguishable). Kind is reconstructed structurally (File / Method / Function via edge + label heuristics); everything else is `Unknown`. Since F2, `Unknown` nodes still get full credit for symbol identity (matched by path + name) in the node-fidelity tables above — they're excluded only from *kind-labelling accuracy* (a separate table), where they count as `unlabelled` rather than wrong or absent. See `adapters/graphify.adapter.ts` for the exact rule. `AMBIGUOUS` confidence was not observed in this run (0% per the tool's own report).",
       "**Graphify's `extends` relation is config-level (e.g. package.json `eslint.extends`), not class inheritance** — verified by sampling; real class/interface heritage is the `inherits` relation. The adapter maps `inherits`→EXT***REMOVED***S and excludes `extends`. Its `references` relation (generic identifier/property references) has no equivalent edge type in our ontology and is excluded, unlike GitNexus's ACCESSES.",
@@ -292,52 +478,24 @@ async function main(): Promise<void> {
       '**Potpie suppresses the reverse direction of a `REFERENCES` edge and has no `resolved`/`confidence` field** — `resolved`/`confidence` are recorded as `null`, never synthesized `true`; mutual type references between two interfaces are silently unrepresentable by design.',
       "**Potpie's LLM docstring/inference layer and temporal claim graph (`valid_at`/`invalid_at`) were not scored** — different ontology, out of scope for this AST-graph comparison.",
       "**Potpie's \"blast-radius / impact analysis\" (capability matrix) runs over LLM-agent-curated claims, not the deterministic AST graph scored here** — `InfraTopologyReader` (`context-engine/.../readers/infra_topology.py`) does bounded-depth `DEP***REMOVED***S_ON` traversal, but those claims are proposed/committed by an LLM harness, unlike GitNexus/Graphify/Vyazen's compiler- or heuristic-derived call graphs. **No incremental re-indexing** — `extract_graph`/`parser_runner` always does a full fresh parse; there's no file-hash/mtime-based changed-files-only path.",
+      ...TARGET_CONFIG.extraCaveats,
     ],
     commitSha: COMMIT_SHA,
     coverage,
     d1,
     d2,
-    d3: {
-      // Measured manually via `/usr/bin/time -l` during this eval pass (2026-07-26/27) —
-      // not reproduced automatically by this script. Re-measure if re-running D3.
-      GitNexus: {
-        indexSize:
-          '1.04 GB (.gitnexus/, embeddings skipped — 86,920 nodes exceeds the 50k safety cap)',
-        notes: '`gitnexus analyze --embeddings --force`',
-        peakRss: '4.00 GiB',
-        wallClock: '71.8s',
-      },
-      Graphify: {
-        indexSize: '95.6 MB (graphify-out/graph.json)',
-        notes: '`graphify update . --force`, 56,412 nodes / 163,985 raw edges, 1,941 communities',
-        peakRss: '3.03 GiB',
-        wallClock: '149.5s',
-      },
-      Potpie: {
-        indexSize:
-          '169 MiB (potpie-out/graph.ndjson, raw NDJSON — no persisted index; the payload is normally written straight to Neo4j as a 1:1 dump, §2.2)',
-        notes:
-          '`potpie-parse <babylonjs>`, 54,034 nodes / 182,139 raw edges (47,399 CONTAINS + 134,740 REFERENCES). Dramatically lighter than expected (§Phase 3 predicted a 3-4 GiB band matching GitNexus/Graphify) — Rust + rayon-parallel tree-sitter tagging with no scope/type resolution is simply a smaller workload than a resolved-edge or communities-clustering index.',
-        peakRss: '1.03 GiB (maximum resident set size, `/usr/bin/time -l`)',
-        wallClock: '8.1s',
-      },
-      Vyazen: {
-        indexSize: '—',
-        notes:
-          'Live deployment, indexed prior to this eval pass — this run only performed a read-only Cypher export (minutes), not a fresh index build. Not comparable to a cold-start number.',
-        peakRss: '—',
-        wallClock: '—',
-      },
-    },
+    d3: TARGET_CONFIG.d3,
     d4,
     generatedAt: new Date().toISOString(),
     graphs,
     oracleResolvedRate: oracle.resolvedCount > 0 ? oracle.resolvedCount / oracle.totalEdges : 0,
+    repoLabel: TARGET_CONFIG.repoLabel,
+    repoStats: TARGET_CONFIG.repoStats,
     resolutionTiers,
   });
 
   const { writeFileSync } = await import('node:fs');
-  const scorecardPath = join(import.meta.dir, '..', 'CODE_GRAPH_EVAL_SCORECARD.md');
+  const scorecardPath = join(import.meta.dir, '..', TARGET_CONFIG.scorecardFileName);
   writeFileSync(scorecardPath, scorecard);
   console.log(`\n[runner] Scorecard written to ${scorecardPath}`);
   console.log('\n=== Done ===');
