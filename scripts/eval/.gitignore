@@ -2,3 +2,13 @@
 /babylonjs/
 /potpie/
 /potpie-out/
+/vscode/
+
+# Regenerable eval data output (parallel to code-graph/data/ ignored by root .gitignore)
+/code-graph/data-vscode/
+
+# Generated HTML comparison reports
+*.html
+
+# macOS metadata
+.DS_Store
