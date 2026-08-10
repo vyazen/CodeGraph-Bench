@@ -320,7 +320,7 @@ function assertFilesOwnedOnce(ownedFiles: readonly string[], seenFiles: Set<stri
 }
 
 /**
- * Mirrors `the type-checker oracle`'s `loadCompilerOptions`
+ * Mirrors `loadCompilerOptions`
  * exactly, including all three fallback paths (VSCODE_CODE_GRAPH_EVAL_PLAN.md
  * §1.2): no tsconfig, tsconfig read/parse error, and tsconfig OK but with an
  * empty `fileNames` list. A project with no tsconfig is still analyzed — never
@@ -827,8 +827,8 @@ export class TsTypeCheckerOracle {
    * container and are captured separately — so call extraction must STOP at them.
    * Anonymous inline callbacks (passed as arguments, IIFEs, array elements, …)
    * are NOT name-bound: their calls belong to the nearest named enclosing
-   * function/method, which is exactly how both the resolved-edge and
-   * GitNexus adapters attribute them.
+   * function/method, which is exactly how both the resolved-edge
+   * adapter and GitNexus attribute them.
    */
   private isNameBound(fn: ts.Node): boolean {
     const p = fn.parent;

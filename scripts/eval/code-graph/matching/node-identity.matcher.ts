@@ -73,7 +73,7 @@ function isMatchableName(name: string | undefined | null): boolean {
 
 /**
  * Strip an accessor naming convention so `get:min`/`set:min` (the oracle's
- * and a resolved-edge tool's convention) matches a plain `min`
+ * and a tool's convention) matches a plain `min`
  * (GitNexus/Graphify/Potpie's convention). Per F1 in
  * CODE_GRAPH_EVAL_FAIRNESS_PLAN.md: matching is name-exact, so without this
  * every accessor is scored as both FP and FN for any tool that doesn't share

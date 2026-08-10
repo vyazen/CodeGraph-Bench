@@ -511,7 +511,7 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('## D1 — Depth moat');
   lines.push('');
   lines.push(
-    '**What this measures:** A tool that uses the TS compiler to resolve edges knows "method A calls method B specifically", not just "A calls something named B". The question: of that tool\'s resolved edges, how many does each competitor also find, and how many point to the right target?'
+    '**What this measures:** A tool with resolved edges knows "method A calls method B specifically", not just "A calls something named B". The question: of that tool\'s resolved edges, how many does each competitor also find, and how many point to the right target?'
   );
   lines.push('');
   lines.push(
@@ -548,7 +548,7 @@ export function generateScorecard(input: ScorecardInput): string {
       lines.push(`#### ${name} resolved-edge slice — the headline`);
       lines.push('');
       lines.push(
-        `${name} marks edges as \`resolved=true\` when the TS compiler confirmed the target. Of those: how many does the oracle confirm (edge exists)? And how many have the **correct target** (same file + line as the type checker)?`
+        `${name} marks edges as \`resolved=true\` when it confirmed the target. Of those: how many does the oracle confirm (edge exists)? And how many have the **correct target** (same file + line as the type checker)?`
       );
       lines.push('');
       lines.push(
@@ -749,7 +749,7 @@ export function generateScorecard(input: ScorecardInput): string {
   );
   lines.push('| **TP / FP / FN** | True Positive / False Positive / False Negative. |');
   lines.push(
-    '| **USES_TYPE** | Edge from a typed element to the type it references (e.g. `x: Foo` → `Foo`). Emitted by resolved tools and by Potpie (type-annotation + `new`-expression references only, §4). |'
+    '| **USES_TYPE** | Edge from a typed element to the type it references (e.g. `x: Foo` → `Foo`). Emitted by tools that resolve type references and by Potpie (type-annotation + `new`-expression references only, §4). |'
   );
   lines.push('');
 

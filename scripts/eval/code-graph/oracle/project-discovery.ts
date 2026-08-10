@@ -1,15 +1,15 @@
 /**
  * Project discovery for the multi-project oracle.
  *
- * Reimplements the two rules a resolved-edge indexer uses to find TS/JS
- * project boundaries — `project detector` (one project per `package.json`,
- * TS-capable iff a `tsconfig*.json` sits in the same directory) and
+ * Reimplements the two rules an indexer uses to find TS/JS
+ * project boundaries — one project per `package.json`,
+ * TS-capable iff a `tsconfig*.json` sits in the same directory, and
  * `selectTsconfigForProject` (deterministic tsconfig-variant priority) — so
- * the oracle discovers the same boundaries a real resolved-edge index would,
+ * the oracle discovers the same boundaries a real index would,
  * without depending on the indexer's own module graph or a live database
  * connection.
  *
- * F17: the rule above mirrors a resolved-edge indexer, and it has a blind
+ * F17: the rule above mirrors an indexer, and it has a blind
  * spot it shares — a repo whose real TS config lives in a source directory
  * with no `package.json` next to it (e.g. vscode's `src/tsconfig.json`) never
  * gets that tsconfig selected. Every file under it then falls back to
@@ -94,7 +94,7 @@ function buildProject(rootPath: string, filePaths: readonly string[]): OraclePro
 }
 
 /**
- * Detects one project per `package.json` — mirrors `project detector.detect`.
+ * Detects one project per `package.json` — mirrors the project detector.
  * TS-capability is a same-directory tsconfig existence check, independent of
  * which specific variant `selectTsconfigForProject` ends up picking.
  */
@@ -175,7 +175,7 @@ function isUnderRoot(filePath: string, rootPath: string): boolean {
 /**
  * Assigns each file to exactly one project: the deepest (longest `rootPath`)
  * project whose root contains it. This is a deliberate divergence from
- * a resolved-edge tool's own `queryProjectFiles`, whose `STARTS WITH ''`
+ * a tool's own `queryProjectFiles`, whose `STARTS WITH ''`
  * prefix match lets projects overlap (root owns everything, sub-projects
  * own their subtree again). The oracle needs each symbol/edge emitted
  * exactly once, so ownership here is exclusive.

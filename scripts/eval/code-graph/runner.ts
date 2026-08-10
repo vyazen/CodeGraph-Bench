@@ -86,7 +86,7 @@ const REPO_TARGETS: Record<EvalTargetName, RepoTargetConfig> = {
         indexSize:
           '169 MiB (potpie-out/graph.ndjson, raw NDJSON — no persisted index; the payload is normally written straight to Neo4j as a 1:1 dump, §2.2)',
         notes:
-          '`potpie-parse <babylonjs>`, 54,034 nodes / 182,139 raw edges (47,399 CONTAINS + 134,740 REFERENCES). Dramatically lighter than expected (§Phase 3 predicted a 3-4 GiB band matching GitNexus/Graphify) — Rust + rayon-parallel tree-sitter tagging with no scope/type resolution is simply a smaller workload than a resolved-edge or communities-clustering index.',
+          '`potpie-parse <babylonjs>`, 54,034 nodes / 182,139 raw edges (47,399 CONTAINS + 134,740 REFERENCES). Dramatically lighter than expected (§Phase 3 predicted a 3-4 GiB band matching GitNexus/Graphify) — Rust + rayon-parallel tree-sitter tagging with no scope/type resolution is simply a smaller workload than a semantic or communities-clustering index.',
         peakRss: '1.03 GiB (maximum resident set size, `/usr/bin/time -l`)',
         wallClock: '8.1s',
       },
@@ -454,7 +454,7 @@ async function main(): Promise<void> {
 
   const scorecard = generateScorecard({
     caveats: [
-      "**TypeScript is a resolved-edge tool's best case.**   A TS-only result overstates the general advantage for resolved-edge tools.",
+      "**TypeScript is Vyazen's best case.** A TS-only result overstates the general advantage for tools that excel at typed languages.",
       "**Oracle is type-checker-backed (v2).** The oracle uses the full TS compiler with TypeChecker — it can resolve specific call targets, inheritance, and imports. This is neutral: the type checker IS the language's semantics. If a heuristic tool's edge matches the type checker's resolution, it's a TP.",
       '**Target accuracy replaces "resolution rate".** Instead of comparing a boolean "resolved" (which meant different things per tool), we now measure: of the tool\'s TPs, what fraction point to the SAME target the type checker resolves to (by path + startLine ±2)? This is "does the edge point to the right code?"',
       "**Two-level IMPORTS scoring.** Level 1: module dependency (File→File) — all tools compete. Level 2: symbol-level (File→Symbol) — an advantage for tools that model imports at symbol granularity. GitNexus's 0 TP on symbol-level IMPORTS is a granularity difference, not a quality failure.",
@@ -463,7 +463,7 @@ async function main(): Promise<void> {
       '**Node identity matching** uses (path, name, startLine±2). Overloads resolved by nearest line. Anonymous/computed names skipped.',
       monorepoCaveat,
       "**File ownership: deepest matching project owns a file.** The oracle assigns each file to the project with the longest `rootPath` prefix match, so every symbol/edge is emitted exactly once — asserted at runtime; a file walked by more than one project throws rather than silently duplicating. This is a deliberate divergence from a tool's own overlapping prefix scoping: the oracle has a ground-truth uniqueness requirement a per-project graph-write step doesn't.",
-      "**`.d.ts` edge-fidelity asymmetry.** The oracle's F3 policy includes declaration files in edge extraction; a resolved-edge tool's edge resolver may skip them outright. Node-fidelity is unaffected — AST-based tools still emit `.d.ts` nodes tools can match — but the oracle can hold `.d.ts`-sourced edges no tool's resolution stage had a chance to produce. Larger on repos that ship more declaration files.",
+      "**`.d.ts` edge-fidelity asymmetry.** The oracle's F3 policy includes declaration files in edge extraction; a tool's edge resolver may skip them outright. Node-fidelity is unaffected — AST-based tools still emit `.d.ts` nodes tools can match — but the oracle can hold `.d.ts`-sourced edges no tool's resolution stage had a chance to produce. Larger on repos that ship more declaration files.",
       `**Graphify ran via the public \`graphify update\` command (v${process.env.GRAPHIFY_VERSION ?? '0.9.27'})** — deterministic tree-sitter extraction, no LLM. \`--mode deep\` (AST + semantic LLM) was deliberately not scored: its LLM-minted nodes aren't comparable to tree-sitter edges.`,
       "**Graphify's `graph.json` carries no symbol-kind field for TS/JS** (class/interface/enum/alias/property/variable are indistinguishable). Kind is reconstructed structurally (File / Method / Function via edge + label heuristics); everything else is `Unknown`. Since F2, `Unknown` nodes still get full credit for symbol identity (matched by path + name) in the node-fidelity tables above — they're excluded only from *kind-labelling accuracy* (a separate table), where they count as `unlabelled` rather than wrong or absent. See `adapters/graphify.adapter.ts` for the exact rule. `AMBIGUOUS` confidence was not observed in this run (0% per the tool's own report).",
       "**Graphify's `extends` relation is config-level (e.g. package.json `eslint.extends`), not class inheritance** — verified by sampling; real class/interface heritage is the `inherits` relation. The adapter maps `inherits`→EXT***REMOVED***S and excludes `extends`. Its `references` relation (generic identifier/property references) has no equivalent edge type in our ontology and is excluded, unlike GitNexus's ACCESSES.",
