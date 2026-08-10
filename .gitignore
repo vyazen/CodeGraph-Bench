@@ -1,0 +1,9 @@
+# Historical run results + scorecards
+eval-results/
+
+# Generated per-target eval data (regenerable)
+scripts/eval/code-graph/data/
+scripts/eval/code-graph/data-vscode/
+
+# macOS metadata
+.DS_Store
