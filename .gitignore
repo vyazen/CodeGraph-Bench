@@ -1,6 +1,16 @@
 # Historical run results + scorecards
 eval-results/
 
+# Generated scorecards + HTML comparison reports under scripts/eval/
+scripts/eval/**/*.md
+scripts/eval/**/*.html
+
+# Vendored subject repo checkouts (gitignored to keep history small)
+scripts/eval/babylonjs/
+scripts/eval/potpie/
+scripts/eval/potpie-out/
+scripts/eval/vscode/
+
 # Generated per-target eval data (regenerable)
 scripts/eval/code-graph/data/
 scripts/eval/code-graph/data-vscode/
