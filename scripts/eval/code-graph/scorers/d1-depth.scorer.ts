@@ -204,14 +204,28 @@ export function crossToolCoverage(
     compToVyaz.set(m.tool.id, m.reference);
   }
 
+  // Index nodes by id (first occurrence wins, matching Array.find semantics).
+  const competitorById = new Map<string, GraphNode>();
+  for (const n of competitorNodes) {
+    if (!competitorById.has(n.id)) {
+      competitorById.set(n.id, n);
+    }
+  }
+  const vyazenById = new Map<string, GraphNode>();
+  for (const n of vyazenNodes) {
+    if (!vyazenById.has(n.id)) {
+      vyazenById.set(n.id, n);
+    }
+  }
+
   // Index competitor edges by (vyazen-from-id, vyazen-to-name, type)
   const compEdgeIdx = new Map<string, number>();
   for (const e of competitorEdges) {
     if (!COMPARABLE_EDGE_TYPES.has(e.type)) {
       continue;
     }
-    const compFrom = competitorNodes.find((n) => n.id === e.fromId);
-    const compTo = competitorNodes.find((n) => n.id === e.toId);
+    const compFrom = competitorById.get(e.fromId);
+    const compTo = competitorById.get(e.toId);
     if (!(compFrom && compTo)) {
       continue;
     }
@@ -235,8 +249,8 @@ export function crossToolCoverage(
     let covers = 0;
     let misses = 0;
     for (const e of vyazenResolved) {
-      const vyazFrom = vyazenNodes.find((n) => n.id === e.fromId);
-      const vyazTo = vyazenNodes.find((n) => n.id === e.toId);
+      const vyazFrom = vyazenById.get(e.fromId);
+      const vyazTo = vyazenById.get(e.toId);
       if (!(vyazFrom && vyazTo)) {
         misses++;
         continue;
