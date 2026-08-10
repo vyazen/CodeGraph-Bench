@@ -1,6 +1,3 @@
-# Historical run results + scorecards
-eval-results/
-
 # Generated scorecards + HTML comparison reports under scripts/eval/
 scripts/eval/**/*.md
 scripts/eval/**/*.html
