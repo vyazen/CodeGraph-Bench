@@ -26,3 +26,4 @@ scripts/eval/code-graph/adapters/vyazen.adapter.ts
 
 # Vyazen runbook — untracked (restores Vyazen-specific config if needed)
 docs/VYAZEN_RUNBOOK.md
+GENERALIZATION_PLAN.md
