@@ -167,29 +167,6 @@ export interface OracleFileResult {
 
 // ── Ontology mappings per tool ────────────────────────────────────────────────
 
-/** Vyazen node label → SymbolType. */
-export function normalizeVyazenKind(label: string): SymbolType {
-  const map: Record<string, SymbolType> = {
-    Class: 'Class',
-    Interface: 'Interface',
-    Enum: 'Enum',
-    Alias: 'Alias',
-    Function: 'Function',
-    Method: 'Method',
-    Constructor: 'Constructor',
-    Property: 'Property',
-    GlobalVariable: 'GlobalVariable',
-    Module: 'Module',
-    Namespace: 'Namespace',
-    File: 'File',
-    Directory: 'Directory',
-    CodeChunk: 'Unknown',
-    Project: 'Unknown',
-    Repo: 'Unknown',
-  };
-  return map[label] ?? 'Unknown';
-}
-
 /** GitNexus node label → SymbolType. */
 export function normalizeGitNexusKind(label: string): SymbolType {
   const map: Record<string, SymbolType> = {
@@ -247,23 +224,9 @@ export function normalizeGitNexusEdgeType(raw: string): EdgeType {
     // Extended edge types — scored separately
     ACCESSES: 'ACCESSES',
     METHOD_OVERRIDES: 'METHOD_OVERRIDES',
-    // No Vyazen equivalent — excluded
+    // No equivalent — excluded
     STEP_IN_PROCESS: 'UNKNOWN',
     HANDLES_ROUTE: 'UNKNOWN',
-  };
-  return map[raw] ?? 'UNKNOWN';
-}
-
-/** Vyazen edge type → EdgeType (identity, but filters unknowns). */
-export function normalizeVyazenEdgeType(raw: string): EdgeType {
-  const map: Record<string, EdgeType> = {
-    CALLS: 'CALLS',
-    IMPORTS: 'IMPORTS',
-    EXT***REMOVED***S: 'EXT***REMOVED***S',
-    IMPLEMENTS: 'IMPLEMENTS',
-    USES_TYPE: 'USES_TYPE',
-    CONTAINS: 'CONTAINS',
-    HAS_CHUNK: 'UNKNOWN',
   };
   return map[raw] ?? 'UNKNOWN';
 }

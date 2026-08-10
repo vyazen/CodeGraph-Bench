@@ -18,3 +18,9 @@ node_modules/
 # macOS metadata
 .DS_Store
 *.html
+
+# Vyazen adapter — contains live infra secrets, kept local only
+scripts/eval/code-graph/adapters/vyazen.adapter.ts
+
+# Vyazen runbook — untracked (restores Vyazen-specific config if needed)
+docs/VYAZEN_RUNBOOK.md
