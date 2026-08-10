@@ -5,5 +5,8 @@ eval-results/
 scripts/eval/code-graph/data/
 scripts/eval/code-graph/data-vscode/
 
+# Node modules (bun install)
+node_modules/
+
 # macOS metadata
 .DS_Store
