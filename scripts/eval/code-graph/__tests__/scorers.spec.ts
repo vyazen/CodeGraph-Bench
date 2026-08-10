@@ -122,19 +122,40 @@ describe('scoreD2 — edges', () => {
   });
 });
 
-describe('scoreD1 — Vyazen resolved slicing', () => {
-  it('reports vyazenResolvedConfirmed when isVyazen=true', () => {
+describe('scoreD1 — resolved-edge slicing', () => {
+  it('reports resolvedConfirmed when includeResolvedSlice=true', () => {
     const report = scoreD1(perfectToolNodes, perfectToolEdges, oracleSymbols, oracleEdges, true);
     const calls = report.perType.find((m) => m.edgeType === 'CALLS');
-    expect(calls?.vyazenResolvedTotal).toBe(1);
-    expect(calls?.vyazenResolvedConfirmed).toBe(1);
+    expect(calls?.resolvedTotal).toBe(1);
+    expect(calls?.resolvedConfirmed).toBe(1);
     expect(calls?.oracleConfirmed).toBe(1);
   });
 
-  it('does not include vyazenResolved fields when isVyazen=false', () => {
+  it('does not include resolved fields when includeResolvedSlice=false', () => {
     const report = scoreD1(perfectToolNodes, perfectToolEdges, oracleSymbols, oracleEdges, false);
     const calls = report.perType.find((m) => m.edgeType === 'CALLS');
-    expect(calls?.vyazenResolvedConfirmed).toBeUndefined();
+    expect(calls?.resolvedConfirmed).toBeUndefined();
+  });
+
+  it('a tool with resolved edges gets the slice when includeResolvedSlice is true', () => {
+    const toolEdges: GraphEdge[] = [
+      { confidence: null, fromId: 't:Foo.bar', resolved: true, toId: 't:helper', type: 'CALLS' },
+      { confidence: null, fromId: 't:Foo.bar', resolved: false, toId: 't:Foo.bar', type: 'CALLS' },
+    ];
+    const report = scoreD1(perfectToolNodes, toolEdges, oracleSymbols, oracleEdges, true);
+    const calls = report.perType.find((m) => m.edgeType === 'CALLS');
+    expect(calls?.resolvedTotal).toBe(1);
+    expect(calls?.resolvedConfirmed).toBe(1);
+  });
+
+  it('a tool with no resolved edges gets no slice fields even with includeResolvedSlice=true', () => {
+    const unresolvedEdges: GraphEdge[] = [
+      { confidence: null, fromId: 't:Foo.bar', resolved: null, toId: 't:helper', type: 'CALLS' },
+    ];
+    const report = scoreD1(perfectToolNodes, unresolvedEdges, oracleSymbols, oracleEdges, true);
+    const calls = report.perType.find((m) => m.edgeType === 'CALLS');
+    expect(calls?.resolvedTotal).toBe(0);
+    expect(calls?.resolvedConfirmed).toBe(0);
   });
 });
 

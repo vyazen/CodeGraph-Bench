@@ -827,7 +827,8 @@ export class TsTypeCheckerOracle {
    * container and are captured separately — so call extraction must STOP at them.
    * Anonymous inline callbacks (passed as arguments, IIFEs, array elements, …)
    * are NOT name-bound: their calls belong to the nearest named enclosing
-   * function/method, which is exactly how both Vyazen and GitNexus attribute them.
+   * function/method, which is exactly how both the resolved-edge and
+   * GitNexus adapters attribute them.
    */
   private isNameBound(fn: ts.Node): boolean {
     const p = fn.parent;
@@ -901,7 +902,8 @@ export class TsTypeCheckerOracle {
 
   /**
    * Extract module-scope call sites (top-level code outside any function/method)
-   * and attribute them to the File. Both Vyazen and GitNexus attribute
+   * and attribute them to the File. Both the resolved-edge and GitNexus
+   * adapters attribute
    * module-scope calls to the File node, so this is a fair, agreed convention.
    *
    * Container declarations (functions, classes, interfaces, enums, imports,

@@ -2,14 +2,14 @@
  * D1 — Depth moat scorer.
  *
  * Per CODE_GRAPH_EVAL_PLAN.md §7 D1:
- *   Of Vyazen's N resolved CALLS edges, what fraction does each
+ *   Of a tool's N resolved CALLS edges, what fraction does each
  *   competitor get right / wrong / miss? Same for EXT***REMOVED***S, IMPLEMENTS, IMPORTS.
  *
  * Adjudicated by the TS compiler oracle (parse-only — see methodology caveat).
  *
- * For Vyazen specifically, we also slice by `resolved` to test the headline
- * claim: "47,046 resolved CALLS edges". Of those resolved edges,
- * how many does the oracle confirm?
+ * For tools that emit `resolved: true` edges, we also slice by `resolved` to
+ * test the headline claim: "N resolved CALLS edges". Of those
+ * resolved edges, how many does the oracle confirm?
  *
  * Confusion matrix per tool per edge type:
  *   TP = tool edge confirmed by oracle
@@ -53,12 +53,12 @@ export interface DepthConfusionMatrix {
   unscoreableExcluded: number;
   /** F18 — tool edges of this type that matched a `scoreable: false` oracle row instead of a genuine FP; excluded from precision and recall alike. */
   unscoreableMatched: number;
-  /** For Vyazen: of the tool's resolved edges, how many does the oracle confirm. */
-  vyazenResolvedConfirmed?: number;
-  /** For Vyazen: of the tool's resolved edges, how many does the type checker confirm the target. */
-  vyazenResolvedTargetConfirmed?: number;
-  /** For Vyazen: total resolved edges of this type. */
-  vyazenResolvedTotal?: number;
+  /** For tools with resolved edges: of the tool's resolved edges, how many does the oracle confirm. */
+  resolvedConfirmed?: number;
+  /** For tools with resolved edges: of the tool's resolved edges, how many does the type checker confirm the target. */
+  resolvedTargetConfirmed?: number;
+  /** For tools with resolved edges: total resolved edges of this type. */
+  resolvedTotal?: number;
 }
 
 /** F9/F18 — see the twin helper in d2-fidelity.scorer.ts for rationale. */
@@ -97,14 +97,15 @@ function safeDiv(num: number, den: number): number {
 /**
  * Compute D1 depth-moat confusion matrix for a tool vs the oracle.
  *
- * @param isVyazen If true, also compute the resolved-edge slice (Vyazen-only).
+ * @param includeResolvedSlice If true, also compute the resolved-edge slice
+ *   (for tools that emit `resolved: true` edges).
  */
 export function scoreD1(
   toolNodes: GraphNode[],
   toolEdges: GraphEdge[],
   oracleSymbols: OracleSymbol[],
   oracleEdges: OracleEdge[],
-  isVyazen = false
+  includeResolvedSlice = false
 ): D1Report {
   const matchResult = matchNodes(toolNodes, oracleSymbols);
   const nodeMatches: NodeMatch[] = matchResult.matched;
@@ -150,7 +151,7 @@ export function scoreD1(
       ...computeEdgeFairness(adjudication, t, tp),
     };
 
-    if (isVyazen) {
+    if (includeResolvedSlice) {
       const resolvedEdges = toolEdges.filter((e) => e.type === t && e.resolved === true);
       const resolvedTp = adjudication.truePositives.filter(
         (e) => e.type === t && e.resolved === true
@@ -160,9 +161,9 @@ export function scoreD1(
       ).length;
       matrix = {
         ...matrix,
-        vyazenResolvedConfirmed: resolvedTp,
-        vyazenResolvedTargetConfirmed: resolvedTargetConfirmed,
-        vyazenResolvedTotal: resolvedEdges.length,
+        resolvedConfirmed: resolvedTp,
+        resolvedTargetConfirmed,
+        resolvedTotal: resolvedEdges.length,
       };
     }
 
@@ -176,12 +177,13 @@ export function scoreD1(
 }
 
 /**
- * Cross-tool coverage: of Vyazen's resolved edges, how many does the competitor
- * also have (regardless of oracle)? This measures raw coverage, not correctness.
+ * Cross-tool coverage: of the reference tool's resolved edges, how many does the
+ * competitor also have (regardless of oracle)? This measures raw coverage, not
+ * correctness.
  */
 export function crossToolCoverage(
-  vyazenNodes: GraphNode[],
-  vyazenEdges: GraphEdge[],
+  referenceNodes: GraphNode[],
+  referenceEdges: GraphEdge[],
   competitorNodes: GraphNode[],
   competitorEdges: GraphEdge[],
   competitorName: string
@@ -189,19 +191,19 @@ export function crossToolCoverage(
   competitorCovers: number;
   competitorMisses: number;
   edgeType: EdgeType;
-  vyazenResolved: number;
+  referenceResolved: number;
 }> {
-  // Match competitor nodes to Vyazen nodes (treating Vyazen as the reference).
-  // Both sides are GraphNode — matchNodes' claim key reads OracleSymbol.localId,
-  // which GraphNode doesn't have, so it must not be reused here (see
-  // matchToolNodes' doc comment).
-  const matchResult = matchToolNodes(competitorNodes, vyazenNodes);
+  // Match competitor nodes to reference nodes (treating the reference tool as
+  // the baseline). Both sides are GraphNode — matchNodes' claim key reads
+  // OracleSymbol.localId, which GraphNode doesn't have, so it must not be
+  // reused here (see matchToolNodes' doc comment).
+  const matchResult = matchToolNodes(competitorNodes, referenceNodes);
   const nodeMatches = matchResult.matched;
 
-  // Build competitor → vyazen node id map
-  const compToVyaz = new Map<string, GraphNode>();
+  // Build competitor → reference node id map
+  const compToRef = new Map<string, GraphNode>();
   for (const m of nodeMatches) {
-    compToVyaz.set(m.tool.id, m.reference);
+    compToRef.set(m.tool.id, m.reference);
   }
 
   // Index nodes by id (first occurrence wins, matching Array.find semantics).
@@ -211,14 +213,14 @@ export function crossToolCoverage(
       competitorById.set(n.id, n);
     }
   }
-  const vyazenById = new Map<string, GraphNode>();
-  for (const n of vyazenNodes) {
-    if (!vyazenById.has(n.id)) {
-      vyazenById.set(n.id, n);
+  const refById = new Map<string, GraphNode>();
+  for (const n of referenceNodes) {
+    if (!refById.has(n.id)) {
+      refById.set(n.id, n);
     }
   }
 
-  // Index competitor edges by (vyazen-from-id, vyazen-to-name, type)
+  // Index competitor edges by (reference-from-id, reference-to-name, type)
   const compEdgeIdx = new Map<string, number>();
   for (const e of competitorEdges) {
     if (!COMPARABLE_EDGE_TYPES.has(e.type)) {
@@ -229,11 +231,11 @@ export function crossToolCoverage(
     if (!(compFrom && compTo)) {
       continue;
     }
-    const vyazFrom = compToVyaz.get(compFrom.id);
-    if (!vyazFrom) {
+    const refFrom = compToRef.get(compFrom.id);
+    if (!refFrom) {
       continue;
     }
-    const key = `${vyazFrom.id}\0${compTo.name}\0${e.type}`;
+    const key = `${refFrom.id}\0${compTo.name}\0${e.type}`;
     compEdgeIdx.set(key, (compEdgeIdx.get(key) ?? 0) + 1);
   }
 
@@ -241,21 +243,21 @@ export function crossToolCoverage(
     competitorCovers: number;
     competitorMisses: number;
     edgeType: EdgeType;
-    vyazenResolved: number;
+    referenceResolved: number;
   }> = [];
 
   for (const t of COMPARABLE_EDGE_TYPES) {
-    const vyazenResolved = vyazenEdges.filter((e) => e.type === t && e.resolved === true);
+    const refResolved = referenceEdges.filter((e) => e.type === t && e.resolved === true);
     let covers = 0;
     let misses = 0;
-    for (const e of vyazenResolved) {
-      const vyazFrom = vyazenById.get(e.fromId);
-      const vyazTo = vyazenById.get(e.toId);
-      if (!(vyazFrom && vyazTo)) {
+    for (const e of refResolved) {
+      const refFrom = refById.get(e.fromId);
+      const refTo = refById.get(e.toId);
+      if (!(refFrom && refTo)) {
         misses++;
         continue;
       }
-      const key = `${vyazFrom.id}\0${vyazTo.name}\0${t}`;
+      const key = `${refFrom.id}\0${refTo.name}\0${t}`;
       if ((compEdgeIdx.get(key) ?? 0) > 0) {
         covers++;
       } else {
@@ -266,7 +268,7 @@ export function crossToolCoverage(
       competitorCovers: covers,
       competitorMisses: misses,
       edgeType: t,
-      vyazenResolved: vyazenResolved.length,
+      referenceResolved: refResolved.length,
     });
   }
 

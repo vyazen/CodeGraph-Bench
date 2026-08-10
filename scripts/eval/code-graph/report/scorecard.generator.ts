@@ -228,13 +228,13 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('| v1 (parse-only oracle) | v2 (type-checker oracle) |');
   lines.push('|---|---|');
   lines.push(
-    "| Oracle couldn't resolve call targets — Vyazen's resolved edges couldn't be confirmed | Oracle CAN resolve call targets — Vyazen's resolved edges are now properly confirmed |"
+    "| Oracle couldn't resolve call targets — resolved edges couldn't be confirmed | Oracle CAN resolve call targets — resolved edges are now properly confirmed |"
   );
   lines.push(
-    '| "Resolution rate" compared apples to oranges (compiler assertion vs heuristic confidence) | "Target accuracy" measures the same thing for both tools: does the edge point to the target the type checker confirms? |'
+    '| "Resolution rate" compared apples to oranges (compiler assertion vs heuristic confidence) | "Target accuracy" measures the same thing for every tool: does the edge point to the target the type checker confirms? |'
   );
   lines.push(
-    '| IMPORTS scored at symbol-level only (GitNexus got 0 TP due to File→File vs File→Symbol mismatch) | IMPORTS scored at TWO levels: module dependency (both tools) + symbol-level (Vyazen advantage) |'
+    '| IMPORTS scored at symbol-level only (GitNexus got 0 TP due to File→File vs File→Symbol mismatch) | IMPORTS scored at TWO levels: module dependency (all tools) + symbol-level (advantage for tools that model symbol granularity) |'
   );
   lines.push(
     '| USES_TYPE, ACCESSES, METHOD_OVERRIDES excluded entirely | Scored separately — each tool on what it produces |'
@@ -262,8 +262,8 @@ export function generateScorecard(input: ScorecardInput): string {
     // F23 — a self-loop with `resolved: false` is "relationship detected,
     // target not asserted" (see edge-adjudicator.ts's abstention rule), not a
     // claim. Counting it in the headline "Edges" total makes a tool that
-    // abstains heavily (e.g. Vyazen on vscode: 246,813 of these) read as if
-    // it produced more assertions than a tool that doesn't abstain at all.
+    // abstains heavily read as if it produced more assertions than a tool
+    // that doesn't abstain at all.
     const abstentions = g.edges.filter((e) => e.fromId === e.toId && e.resolved === false).length;
     const asserted = g.meta.edgeCount - abstentions;
     lines.push(
@@ -276,7 +276,7 @@ export function generateScorecard(input: ScorecardInput): string {
   );
   lines.push('');
   lines.push(
-    "> **Abstentions** (F23) are self-loop edges the tool marks `resolved: false` — an explicit \"relationship detected, target not asserted\", not a claim the oracle can confirm or reject. Only Vyazen currently emits these (see caveats); every other tool's abstention count is 0 by construction, not because it never fails to resolve a target. Note this headline count can exceed the `Unresolved abstentions` figure reported per tool in D2 below — D2's figure is scoped to the edges that reach the main comparable-edge adjudication, and F6's IMPORTS→File partition removes a large share of self-loop IMPORTS abstentions before adjudication runs at all."
+    "> **Abstentions** (F23) are self-loop edges the tool marks `resolved: false` — an explicit \"relationship detected, target not asserted\", not a claim the oracle can confirm or reject. Only tools that mark self-loops `resolved: false` emit these (see caveats); every other tool's abstention count is 0 by construction, not because it never fails to resolve a target. Note this headline count can exceed the `Unresolved abstentions` figure reported per tool in D2 below — D2's figure is scoped to the edges that reach the main comparable-edge adjudication, and F6's IMPORTS→File partition removes a large share of self-loop IMPORTS abstentions before adjudication runs at all."
   );
   lines.push('');
   lines.push('---');
@@ -511,7 +511,7 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('## D1 — Depth moat');
   lines.push('');
   lines.push(
-    '**What this measures:** Vyazen uses the TS compiler to resolve edges — it knows "method A calls method B specifically", not just "A calls something named B". The question: of Vyazen\'s resolved edges, how many does the competitor also find, and how many point to the right target?'
+    '**What this measures:** A tool that uses the TS compiler to resolve edges knows "method A calls method B specifically", not just "A calls something named B". The question: of that tool\'s resolved edges, how many does each competitor also find, and how many point to the right target?'
   );
   lines.push('');
   lines.push(
@@ -536,11 +536,19 @@ export function generateScorecard(input: ScorecardInput): string {
     }
     lines.push('');
 
-    if (name === 'Vyazen') {
-      lines.push('#### Vyazen resolved-edge slice — the headline');
+    // Resolved-edge slice: any tool that emits `resolved: true` edges gets
+    // this section, not just a hardcoded tool name.
+    const hasResolvedSlice = d1.perType.some(
+      (m) =>
+        m.resolvedTotal !== undefined &&
+        m.resolvedConfirmed !== undefined &&
+        m.resolvedTargetConfirmed !== undefined
+    );
+    if (hasResolvedSlice) {
+      lines.push(`#### ${name} resolved-edge slice — the headline`);
       lines.push('');
       lines.push(
-        'Vyazen marks edges as `resolved=true` when the TS compiler confirmed the target. Of those: how many does the oracle confirm (edge exists)? And how many have the **correct target** (same file + line as the type checker)?'
+        `${name} marks edges as \`resolved=true\` when the TS compiler confirmed the target. Of those: how many does the oracle confirm (edge exists)? And how many have the **correct target** (same file + line as the type checker)?`
       );
       lines.push('');
       lines.push(
@@ -551,22 +559,22 @@ export function generateScorecard(input: ScorecardInput): string {
       );
       for (const m of d1.perType) {
         if (
-          m.vyazenResolvedTotal !== undefined &&
-          m.vyazenResolvedConfirmed !== undefined &&
-          m.vyazenResolvedTargetConfirmed !== undefined
+          m.resolvedTotal !== undefined &&
+          m.resolvedConfirmed !== undefined &&
+          m.resolvedTargetConfirmed !== undefined
         ) {
           const confRate =
-            m.vyazenResolvedTotal > 0 ? m.vyazenResolvedConfirmed / m.vyazenResolvedTotal : 0;
+            m.resolvedTotal > 0 ? m.resolvedConfirmed / m.resolvedTotal : 0;
           const tgtRate =
-            m.vyazenResolvedTotal > 0 ? m.vyazenResolvedTargetConfirmed / m.vyazenResolvedTotal : 0;
+            m.resolvedTotal > 0 ? m.resolvedTargetConfirmed / m.resolvedTotal : 0;
           lines.push(
-            `| ${m.edgeType} | ${num(m.vyazenResolvedTotal)} | ${num(m.vyazenResolvedConfirmed)} | ${num(m.vyazenResolvedTargetConfirmed)} | ${pct(confRate)} | ${pct(tgtRate)} |`
+            `| ${m.edgeType} | ${num(m.resolvedTotal)} | ${num(m.resolvedConfirmed)} | ${num(m.resolvedTargetConfirmed)} | ${pct(confRate)} | ${pct(tgtRate)} |`
           );
         }
       }
       lines.push('');
       lines.push(
-        "> **Edge confirmation rate** = of Vyazen's resolved edges, how many the oracle confirms exist (by name or target). **Target accuracy** = of Vyazen's resolved edges, how many point to the exact target the type checker resolves to. The gap between these two numbers shows edges where the relationship exists but Vyazen's target might differ from the oracle's (e.g. different overloads)."
+        `> **Edge confirmation rate** = of ${name}'s resolved edges, how many the oracle confirms exist (by name or target). **Target accuracy** = of ${name}'s resolved edges, how many point to the exact target the type checker resolves to. The gap between these two numbers shows edges where the relationship exists but the tool's target might differ from the oracle's (e.g. different overloads).`
       );
       lines.push('');
     }
@@ -574,25 +582,25 @@ export function generateScorecard(input: ScorecardInput): string {
 
   // ── Cross-tool coverage ────────────────────────────────────────────────────
   if (input.coverage) {
-    lines.push('### Cross-tool coverage — does the competitor find what Vyazen finds?');
+    lines.push('### Cross-tool coverage — does the competitor find what the reference tool finds?');
     lines.push('');
     lines.push(
-      "Of Vyazen's resolved edges, how many does the competitor also emit? This is **raw coverage**, not correctness."
+      "Of the reference tool's resolved edges, how many does the competitor also emit? This is **raw coverage**, not correctness."
     );
     lines.push('');
-    for (const [compName, coverage] of Object.entries(input.coverage)) {
-      lines.push(`#### Vyazen → ${compName}`);
+    for (const [pairKey, coverage] of Object.entries(input.coverage)) {
+      lines.push(`#### ${pairKey}`);
       lines.push('');
       lines.push(
-        '| Edge | Vyazen resolved | Competitor covers | Competitor misses | Coverage rate |'
+        '| Edge | Reference resolved | Competitor covers | Competitor misses | Coverage rate |'
       );
       lines.push(
-        '|------|-----------------|-------------------|-------------------|---------------|'
+        '|------|---------------------|-------------------|-------------------|---------------|'
       );
       for (const c of coverage) {
-        const rate = c.vyazenResolved > 0 ? c.competitorCovers / c.vyazenResolved : 0;
+        const rate = c.referenceResolved > 0 ? c.competitorCovers / c.referenceResolved : 0;
         lines.push(
-          `| ${c.edgeType} | ${num(c.vyazenResolved)} | ${num(c.competitorCovers)} | ${num(c.competitorMisses)} | ${pct(rate)} |`
+          `| ${c.edgeType} | ${num(c.referenceResolved)} | ${num(c.competitorCovers)} | ${num(c.competitorMisses)} | ${pct(rate)} |`
         );
       }
       lines.push('');
@@ -741,7 +749,7 @@ export function generateScorecard(input: ScorecardInput): string {
   );
   lines.push('| **TP / FP / FN** | True Positive / False Positive / False Negative. |');
   lines.push(
-    '| **USES_TYPE** | Edge from a typed element to the type it references (e.g. `x: Foo` → `Foo`). Emitted by Vyazen (resolved) and Potpie (type-annotation + `new`-expression references only, §4). |'
+    '| **USES_TYPE** | Edge from a typed element to the type it references (e.g. `x: Foo` → `Foo`). Emitted by resolved tools and by Potpie (type-annotation + `new`-expression references only, §4). |'
   );
   lines.push('');
 

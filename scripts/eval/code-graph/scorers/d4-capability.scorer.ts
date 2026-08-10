@@ -4,10 +4,11 @@
  * Per CODE_GRAPH_EVAL_PLAN.md §7 D4:
  *   Matrix of ontology + query surface: what each tool can answer *at all*.
  *   Qualitative; fastest to produce; weakest as evidence — but it is where
- *   Vyazen's USES_TYPE and the competitors' extras get their fair hearing.
+ *   a tool's USES_TYPE and the competitors' extras get their fair hearing.
  *
- * This is a static matrix — the entries are encoded from the tool's documented
- * ontology + observed graph schema. It doesn't run queries; it reports capability.
+ * The qualitative matrix is data-driven from each tool's declared
+ * capabilities (opt-in). The ontology/edge-type coverage tables are always
+ * computed from observed data.
  */
 
 import type { EdgeType, SymbolType } from '../types';
@@ -40,11 +41,16 @@ export interface D4Report {
  * @param observedKinds Per tool: the set of SymbolType kinds actually present in the tool's graph
  * @param observedEdgeTypes Per tool: the set of EdgeType types actually present
  * @param toolNames Tool names (column headers)
+ * @param declaredCapabilities Optional: per tool, a list of extra capability labels
+ *   (e.g. "Leiden community clustering"). Rows = union of all declared labels;
+ *   per-tool = "yes" if in that tool's list. Tools that declare nothing get "no"
+ *   on every qualitative row — the ontology/edge-type tables still cover them.
  */
 export function scoreD4(
   observedKinds: Record<string, Set<SymbolType>>,
   observedEdgeTypes: Record<string, Set<EdgeType>>,
-  toolNames: string[]
+  toolNames: string[],
+  declaredCapabilities: Record<string, string[]> = {}
 ): D4Report {
   const allKinds = new Set<SymbolType>();
   for (const set of Object.values(observedKinds)) {
@@ -73,77 +79,23 @@ export function scoreD4(
     ),
   }));
 
-  // Static capability matrix — encoded from observed schemas + documented features
-  const capabilityMatrix: CapabilityEntry[] = [
-    {
-      capability: 'Compiler/type-aware edge resolution (resolved=true)',
-      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'no', Vyazen: 'yes' },
-    },
-    {
-      capability: 'resolutionKind slice (compiler-symbol vs receiver-type)',
-      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'no', Vyazen: 'yes' },
-    },
-    {
-      capability: 'USES_TYPE edges (type usage tracking)',
-      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'yes', Vyazen: 'yes' },
-    },
-    {
-      capability: 'Leiden community clustering',
-      tools: { GitNexus: 'yes', Graphify: 'yes', Potpie: 'no', Vyazen: 'no' },
-    },
-    {
-      capability: 'Process tracing (execution flow nodes)',
-      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'no', Vyazen: 'no' },
-    },
-    {
-      capability: 'BM25 + semantic hybrid search',
-      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'yes', Vyazen: 'no' },
-    },
-    {
-      capability: 'Code embeddings (vector search)',
-      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'yes', Vyazen: 'yes' },
-    },
-    {
-      capability: 'Incremental re-indexing',
-      tools: { GitNexus: 'yes', Graphify: 'yes', Potpie: 'no', Vyazen: 'yes' },
-    },
-    {
-      capability: 'Blast-radius / impact analysis',
-      tools: { GitNexus: 'yes', Graphify: 'yes', Potpie: 'yes', Vyazen: 'yes' },
-    },
-    {
-      capability: 'METHOD_OVERRIDES edges',
-      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'no', Vyazen: 'no' },
-    },
-    {
-      capability: 'ACCESSES edges (property access tracking)',
-      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'no', Vyazen: 'no' },
-    },
-    {
-      capability: 'Generic identifier/property reference edges (references, not scored)',
-      tools: { GitNexus: 'no', Graphify: 'yes', Potpie: 'no', Vyazen: 'no' },
-    },
-    {
-      capability: 'Emits call edges for TS at all',
-      tools: { GitNexus: 'yes', Graphify: 'yes', Potpie: 'no', Vyazen: 'yes' },
-    },
-    {
-      capability: 'Symbol kinds beyond FILE/CLASS/INTERFACE/FUNCTION',
-      tools: { GitNexus: 'yes', Graphify: 'no', Potpie: 'no', Vyazen: 'yes' },
-    },
-    {
-      capability: 'Qdrant hybrid dense+BM25+ColBERT search',
-      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'yes', Vyazen: 'no' },
-    },
-    {
-      capability: 'Temporal claim graph (valid_at/invalid_at)',
-      tools: { GitNexus: 'no', Graphify: 'no', Potpie: 'yes', Vyazen: 'no' },
-    },
-    {
-      capability: 'LLM docstring/inference layer (not scored)',
-      tools: { GitNexus: 'no', Graphify: 'yes', Potpie: 'yes', Vyazen: 'no' },
-    },
-  ];
+  // Qualitative capability matrix — data-driven from declared capabilities.
+  // Rows = union of all tools' declared labels; per-tool = "yes" if declared.
+  const allCapabilityLabels = new Set<string>();
+  for (const caps of Object.values(declaredCapabilities)) {
+    for (const c of caps) {
+      allCapabilityLabels.add(c);
+    }
+  }
+  const capabilityMatrix: CapabilityEntry[] = [...allCapabilityLabels].map((capability) => ({
+    capability,
+    tools: Object.fromEntries(
+      toolNames.map((t) => [
+        t,
+        (declaredCapabilities[t]?.includes(capability) ? 'yes' : 'no') as 'yes' | 'no',
+      ])
+    ),
+  }));
 
   return { ontologyCoverage, edgeTypeCoverage, capabilityMatrix };
 }

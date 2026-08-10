@@ -5,8 +5,8 @@
  * - **Target accuracy**: of the tool's TPs, what fraction were confirmed by
  *   the type checker's resolved target (path + startLine) vs. name only?
  *   This measures "does the edge point to the RIGHT target?"
- * - **Module-level IMPORTS**: IMPORTS scored at File→File granularity (both
- *   tools) in addition to File→Symbol (Vyazen advantage).
+ * - **Module-level IMPORTS**: IMPORTS scored at File→File granularity (all
+ *   tools) in addition to File→Symbol (an advantage for symbol-level tools).
  * - **Extended edge types**: USES_TYPE, ACCESSES, METHOD_OVERRIDES scored
  *   separately — each tool on what it produces.
  */
@@ -412,7 +412,7 @@ export interface EdgeScoringPartition {
  * F24 — the F6 (IMPORTS granularity) and F8 (member- vs class-level
  * IMPLEMENTS) partitioning used to live only inside `scoreD2`, so `scoreD1`
  * adjudicated the *unpartitioned* comparable-edge set and printed a different
- * precision/FP count for the same tool and the same edge type (e.g. Vyazen
+ * precision/FP count for the same tool and the same edge type (e.g. a
  * IMPORTS 96.9% in D2 vs 75.5% in D1 — D1 was charging FP for File-granularity
  * IMPORTS that D2 correctly routes to the module-level table instead). Both
  * scorers must partition identically before adjudicating, so this is
@@ -717,7 +717,7 @@ export function scoreD2(
   // F6: the oracle's IMPORTS edges are always symbol-granularity (fromLocalId
   // = importing file, targetName = the imported symbol) — it has no File→File
   // relation to match against. A tool that models an import as File→File
-  // (GitNexus, and ~94% of Vyazen's symbol-level IMPORTS FPs — see
+  // (GitNexus, and ~94% of a symbol-level tool's IMPORTS FPs — see
   // CODE_GRAPH_EVAL_FAIRNESS_PLAN.md F6) can never score a TP here by
   // construction; that granularity mismatch is scored fairly in
   // `importsModuleLevel` below and must not also be charged as FP in the

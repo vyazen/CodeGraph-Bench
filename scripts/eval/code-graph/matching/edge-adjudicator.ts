@@ -19,9 +19,10 @@ export interface EdgeAdjudication {
   /**
    * Abstentions: edges where the tool detected a relationship but did not
    * resolve a distinct target (`fromId === toId` with `resolved === false`).
-   * Vyazen exports unresolved calls as self-edges — these are not target
-   * claims, so scoring them as false positives punishes the tool for declining
-   * to guess. Excluded from precision; reported separately (no silent drop).
+   * A resolved-edge tool may export unresolved calls as self-edges — these
+   * are not target claims, so scoring them as false positives punishes the
+   * tool for declining to guess. Excluded from precision; reported separately
+   * (no silent drop).
    */
   abstained: GraphEdge[];
   falseNegatives: OracleEdge[];

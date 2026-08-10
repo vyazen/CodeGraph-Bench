@@ -1,29 +1,24 @@
 /**
  * Project discovery for the multi-project oracle.
  *
- * Reimplements the two rules Vyazen's pipeline uses to find TS/JS project
- * boundaries — `project detector` (one project per `package.json`, TS-capable
- * iff a `tsconfig*.json` sits in the same directory) and `selectTsconfigForProject`
- * (deterministic tsconfig-variant priority) — so the oracle discovers the same
- * boundaries a real Vyazen index would, without depending on gilfoyle's NestJS
- * module graph or a live Neo4j connection. See VSCODE_CODE_GRAPH_EVAL_PLAN.md §1.1
- * for why this is the documented fallback (the primary approach — reading the
- * `Project` nodes Vyazen already wrote for a repo — is Phase 2/adapter territory).
+ * Reimplements the two rules a resolved-edge indexer uses to find TS/JS
+ * project boundaries — `project detector` (one project per `package.json`,
+ * TS-capable iff a `tsconfig*.json` sits in the same directory) and
+ * `selectTsconfigForProject` (deterministic tsconfig-variant priority) — so
+ * the oracle discovers the same boundaries a real resolved-edge index would,
+ * without depending on the indexer's own module graph or a live database
+ * connection.
  *
- * Source of truth mirrored here:
- * - apps/gilfoyle/src/modules/structural-graph/core/detectors/node-project.detector.ts
- * - apps/gilfoyle/src/modules/resolution/core/services/tsconfig-selector.ts
- *
- * F17 (VSCODE_ORACLE_RESOLUTION_FIX_PLAN.md): the rule above is a Vyazen
- * replica, and it has a blind spot Vyazen shares — a repo whose real TS config
- * lives in a source directory with no `package.json` next to it (e.g. vscode's
- * `src/tsconfig.json`) never gets that tsconfig selected. Every file under it
- * then falls back to `loadCompilerOptionsForProject`'s inferred options — no
- * `baseUrl`/`paths`/`module`, so every bare-specifier import in that subtree is
- * unresolvable. `discoverProjects` breaks the mirroring deliberately: it adds
- * one project per tsconfig directory that has no adjacent `package.json`,
- * because the oracle's job is the language's real semantics, not a copy of
- * Vyazen's own detection gap.
+ * F17: the rule above mirrors a resolved-edge indexer, and it has a blind
+ * spot it shares — a repo whose real TS config lives in a source directory
+ * with no `package.json` next to it (e.g. vscode's `src/tsconfig.json`) never
+ * gets that tsconfig selected. Every file under it then falls back to
+ * `loadCompilerOptionsForProject`'s inferred options — no `baseUrl`/`paths`/
+ * `module`, so every bare-specifier import in that subtree is unresolvable.
+ * `discoverProjects` breaks the mirroring deliberately: it adds one project
+ * per tsconfig directory that has no adjacent `package.json`, because the
+ * oracle's job is the language's real semantics, not a copy of the indexer's
+ * own detection gap.
  */
 
 import { readdirSync } from 'node:fs';
@@ -180,10 +175,10 @@ function isUnderRoot(filePath: string, rootPath: string): boolean {
 /**
  * Assigns each file to exactly one project: the deepest (longest `rootPath`)
  * project whose root contains it. This is a deliberate divergence from
- * Vyazen's own `queryProjectFiles`, whose `STARTS WITH ''` prefix match lets
- * projects overlap (root owns everything, sub-projects own their subtree
- * again) — see VSCODE_CODE_GRAPH_EVAL_PLAN.md §1.2. The oracle needs each
- * symbol/edge emitted exactly once, so ownership here is exclusive.
+ * a resolved-edge tool's own `queryProjectFiles`, whose `STARTS WITH ''`
+ * prefix match lets projects overlap (root owns everything, sub-projects
+ * own their subtree again). The oracle needs each symbol/edge emitted
+ * exactly once, so ownership here is exclusive.
  *
  * Every file is guaranteed an owner as long as `projects` includes one with
  * `rootPath === '.'` (which `discoverProjects` always provides).
@@ -205,7 +200,7 @@ export function assignFileOwnership(
 
 /**
  * Walks a repo checkout for its full file list (repo-relative, POSIX-separated
- * paths), skipping `node_modules`/`.git`. Used in place of Vyazen's git-tree
+ * paths), skipping `node_modules`/`.git`. Used in place of a remote git-tree
  * manifest since the oracle operates on a local checkout, not a git blob store.
  */
 export function walkRepoFiles(repoPath: string): string[] {

@@ -1,6 +1,8 @@
 # Generated scorecards + HTML comparison reports under scripts/eval/
 scripts/eval/**/*.md
 scripts/eval/**/*.html
+# Exception: adapters/README.md is a source file, not a generated artifact
+!scripts/eval/code-graph/adapters/README.md
 
 # Vendored subject repo checkouts (gitignored to keep history small)
 scripts/eval/babylonjs/

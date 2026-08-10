@@ -72,11 +72,12 @@ function isMatchableName(name: string | undefined | null): boolean {
 }
 
 /**
- * Strip an accessor naming convention so `get:min`/`set:min` (the oracle's and
- * Vyazen's convention) matches a plain `min` (GitNexus/Graphify/Potpie's
- * convention). Per F1 in CODE_GRAPH_EVAL_FAIRNESS_PLAN.md: matching is
- * name-exact, so without this every accessor is scored as both FP and FN for
- * any tool that doesn't share the oracle's naming convention.
+ * Strip an accessor naming convention so `get:min`/`set:min` (the oracle's
+ * and a resolved-edge tool's convention) matches a plain `min`
+ * (GitNexus/Graphify/Potpie's convention). Per F1 in
+ * CODE_GRAPH_EVAL_FAIRNESS_PLAN.md: matching is name-exact, so without this
+ * every accessor is scored as both FP and FN for any tool that doesn't share
+ * the oracle's naming convention.
  *
  * Recognized conventions: `get:x` / `set:x`, `get x` / `set x`, `getter:x` /
  * `setter:x`, `[get]x` / `[set]x`.
@@ -293,8 +294,9 @@ export interface ToolNodeMatchResult {
 
 /**
  * Match one tool's nodes against another tool's nodes — for cross-tool
- * coverage comparisons where there is no oracle, one tool (e.g. Vyazen)
- * stands in as the reference. Same (path, canonicalName) + nearest-line
+ * coverage comparisons where there is no oracle, one tool (e.g. a
+ * resolved-edge tool) stands in as the reference. Same (path,
+ * canonicalName) + nearest-line
  * strategy as `matchNodes`, but claims each reference node by its own `id`.
  *
  * `matchNodes`' claim key reads `OracleSymbol.localId`, which `GraphNode`
