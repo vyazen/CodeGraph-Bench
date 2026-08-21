@@ -1,9 +1,8 @@
 /**
  * Node identity matcher — matches tool graph nodes to oracle ground-truth nodes.
  *
- * Per CODE_GRAPH_EVAL_PLAN.md §5: "Tools mint IDs differently, so match on
- * (normalized_path, name, startLine) with a ±2-line tolerance. This is where
- * the engineering time actually goes."
+ * Tools mint IDs differently, so we match on (normalized_path, name,
+ * startLine) with a ±2-line tolerance.
  *
  * Known failure modes handled:
  * - Overloads sharing a name → pick nearest startLine (+ same kind)
@@ -74,10 +73,9 @@ function isMatchableName(name: string | undefined | null): boolean {
 /**
  * Strip an accessor naming convention so `get:min`/`set:min` (the oracle's
  * and a tool's convention) matches a plain `min`
- * (GitNexus/Graphify/Potpie's convention). Per F1 in
- * CODE_GRAPH_EVAL_FAIRNESS_PLAN.md: matching is name-exact, so without this
- * every accessor is scored as both FP and FN for any tool that doesn't share
- * the oracle's naming convention.
+ * (GitNexus/Graphify/Potpie's convention). Per F1: matching is name-exact, so
+ * without this every accessor is scored as both FP and FN for any tool that
+ * doesn't share the oracle's naming convention.
  *
  * Recognized conventions: `get:x` / `set:x`, `get x` / `set x`, `getter:x` /
  * `setter:x`, `[get]x` / `[set]x`.

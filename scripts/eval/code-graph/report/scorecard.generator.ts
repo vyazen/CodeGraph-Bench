@@ -32,7 +32,7 @@ export interface ScorecardInput {
   >;
   d1: Record<string, D1Report>;
   d2: Record<string, D2Report>;
-  /** D3 — pipeline cost (wall-clock/RSS/disk), measured manually per CODE_GRAPH_EVAL_PLAN.md §D3. */
+  /** D3 — pipeline cost (wall-clock/RSS/disk), measured manually. */
   d3?: Record<string, D3PipelineCost>;
   d4: D4Report;
   generatedAt: string;
@@ -759,7 +759,6 @@ export function generateScorecard(input: ScorecardInput): string {
   lines.push('| Item | Location |');
   lines.push('|------|----------|');
   lines.push('| This scorecard | `CODE_GRAPH_EVAL_SCORECARD.md` |');
-  lines.push('| Eval plan | `CODE_GRAPH_EVAL_PLAN.md` |');
   lines.push('| Eval harness | `scripts/eval/code-graph/` |');
   lines.push(
     '| Per-tool JSONL | `scripts/eval/code-graph/data/{tool}/nodes.jsonl`, `edges.jsonl` |'

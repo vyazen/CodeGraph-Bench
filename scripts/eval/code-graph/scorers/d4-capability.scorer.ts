@@ -1,10 +1,9 @@
 /**
  * D4 — Capability envelope matrix.
  *
- * Per CODE_GRAPH_EVAL_PLAN.md §7 D4:
- *   Matrix of ontology + query surface: what each tool can answer *at all*.
- *   Qualitative; fastest to produce; weakest as evidence — but it is where
- *   a tool's USES_TYPE and the competitors' extras get their fair hearing.
+ * Matrix of ontology + query surface: what each tool can answer *at all*.
+ * Qualitative; fastest to produce; weakest as evidence — but it is where
+ * a tool's USES_TYPE and the competitors' extras get their fair hearing.
  *
  * The qualitative matrix is data-driven from each tool's declared
  * capabilities (opt-in). The ontology/edge-type coverage tables are always

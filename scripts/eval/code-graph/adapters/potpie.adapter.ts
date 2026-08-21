@@ -1,9 +1,8 @@
 /**
  * Potpie adapter — streams the NDJSON payload written by `potpie-parse <repo_dir>`
- * (the Rust `extract_graph` path, `parsing_rs`; production parser, see
- * POTPIE_EVAL_PLAN.md §2.1/§3).
+ * (the Rust `extract_graph` path, `parsing_rs`; production parser).
  *
- * Schema facts that drove this adapter (measured, not inferred — POTPIE_EVAL_PLAN.md §3):
+ * Schema facts that drove this adapter (measured, not inferred):
  *
  * 1. Records are `{kind:'header'|'node'|'edge'|'footer'}`. The footer carries
  *    `node_count`/`edge_count`/`elapsed_s` and, on parser failure, an `error`

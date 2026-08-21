@@ -1,11 +1,10 @@
 /**
  * D1 — Depth moat scorer.
  *
- * Per CODE_GRAPH_EVAL_PLAN.md §7 D1:
- *   Of a tool's N resolved CALLS edges, what fraction does each
- *   competitor get right / wrong / miss? Same for EXT***REMOVED***S, IMPLEMENTS, IMPORTS.
+ * Of a tool's N resolved CALLS edges, what fraction does each competitor get
+ * right / wrong / miss? Same for EXT***REMOVED***S, IMPLEMENTS, IMPORTS.
  *
- * Adjudicated by the TS compiler oracle (parse-only — see methodology caveat).
+ * Adjudicated by the TS compiler oracle.
  *
  * For tools that emit `resolved: true` edges, we also slice by `resolved` to
  * test the headline claim: "N resolved CALLS edges". Of those

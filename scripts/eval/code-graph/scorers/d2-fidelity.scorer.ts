@@ -1,7 +1,6 @@
 /**
  * D2 — Fidelity scorer (v2: target accuracy + module-level IMPORTS).
  *
- * Per CODE_GRAPH_EVAL_PLAN.md §7 D2, plus improvements:
  * - **Target accuracy**: of the tool's TPs, what fraction were confirmed by
  *   the type checker's resolved target (path + startLine) vs. name only?
  *   This measures "does the edge point to the RIGHT target?"
@@ -141,10 +140,9 @@ export interface D2Report {
      */
     usesTypeFromAgnostic: KindMetrics;
     /**
-     * Phase 5 (VSCODE_CODE_GRAPH_EVAL_PLAN.md §5, item 2): METHOD_OVERRIDES
-     * scored from-side-agnostically — per (containing class, base target)
-     * pair, ignoring whether the edge is attributed to the class or the
-     * overriding method. GitNexus attributes to the Class; the oracle
+     * METHOD_OVERRIDES scored from-side-agnostically — per (containing class,
+     * base target) pair, ignoring whether the edge is attributed to the class
+     * or the overriding method. GitNexus attributes to the Class; the oracle
      * attributes to the overriding Method. Same mismatch shape as USES_TYPE
      * (F4), scored the same way.
      */
@@ -717,8 +715,8 @@ export function scoreD2(
   // F6: the oracle's IMPORTS edges are always symbol-granularity (fromLocalId
   // = importing file, targetName = the imported symbol) — it has no File→File
   // relation to match against. A tool that models an import as File→File
-  // (GitNexus, and ~94% of a symbol-level tool's IMPORTS FPs — see
-  // CODE_GRAPH_EVAL_FAIRNESS_PLAN.md F6) can never score a TP here by
+  // (GitNexus, and ~94% of a symbol-level tool's IMPORTS FPs — see F6) can
+  // never score a TP here by
   // construction; that granularity mismatch is scored fairly in
   // `importsModuleLevel` below and must not also be charged as FP in the
   // symbol-level table. Applied identically to every tool.

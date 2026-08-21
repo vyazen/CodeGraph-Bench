@@ -1,7 +1,6 @@
 /**
  * Graphify adapter — parses `graphify-out/graph.json` written by
- * `graphify update <path> --force` (public CLI, no LLM, per
- * GRAPHIFY_EVAL_PLAN.md §2/§4).
+ * `graphify update <path> --force` (public CLI, no LLM).
  *
  * `graph.json` is a networkx node-link JSON: `{ nodes: [...], links: [...] }`.
  * Two schema facts drove the design below (verified by inspecting a real

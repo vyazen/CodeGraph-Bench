@@ -1,10 +1,10 @@
 /**
- * Phase 5 — fairness regression harness (CODE_GRAPH_EVAL_FAIRNESS_PLAN.md §5).
+ * Fairness regression harness.
  *
- * Five invariants that encode the plan's guiding principle mechanically, so
- * the next regression is caught by CI rather than by a human re-auditing the
- * scorecard: "a scoring rule is only admissible if it would produce the same
- * verdict when the tools' names were swapped."
+ * Five invariants that encode the guiding principle mechanically, so the next
+ * regression is caught by CI rather than by a human re-auditing the scorecard:
+ * "a scoring rule is only admissible if it would produce the same verdict when
+ * the tools' names were swapped."
  *
  * 1. Name-swap invariance
  * 2. Oracle-blindness invariance
@@ -255,11 +255,11 @@ describe('1. Name-swap invariance', () => {
 describe('2. Oracle-blindness invariance', () => {
   it('a tool modelling declare module / declare global / .d.ts / mixin extends scores zero FP', () => {
     // These four constructs were the oracle's actual blind spots pre-F3/F12
-    // (CODE_GRAPH_EVAL_FAIRNESS_PLAN.md F3, F12): tool nodes/edges for them
-    // used to be charged as FP because the oracle simply had no row to match
-    // against. Post-fix, the oracle sees all four — so this fixture now
-    // serves as the regression guard: if the F3/F12 fix ever regresses, the
-    // FP set for a tool that still models these constructs reappears here.
+    // (F3, F12): tool nodes/edges for them used to be charged as FP because
+    // the oracle simply had no row to match against. Post-fix, the oracle sees
+    // all four — so this fixture now serves as the regression guard: if the
+    // F3/F12 fix ever regresses, the FP set for a tool that still models these
+    // constructs reappears here.
     const { symbols, edges } = runOracle({
       'x.ts': 'export interface Base { id: number }',
       'ambient.d.ts': `

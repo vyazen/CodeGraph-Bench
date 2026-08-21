@@ -1,10 +1,10 @@
 /**
  * Code-Graph Eval — common JSONL schema + ontology mappings.
  *
- * Per CODE_GRAPH_EVAL_PLAN.md §5, each tool adapter emits nodes.jsonl / edges.jsonl
- * in a common format so they can be compared against the TS compiler oracle.
+ * Each tool adapter emits nodes.jsonl / edges.jsonl in a common format
+ * so they can be compared against the TS compiler oracle.
  *
- * `kind` normalizes into the SymbolType union from parse-diagnostic;
+ * `kind` normalizes into the SymbolType union;
  * `type` normalizes into EdgeType. Tools that don't have an equivalent emit
  * `kind: 'Unknown'` / `type: 'UNKNOWN'` and are excluded from head-to-head.
  */
@@ -128,8 +128,8 @@ export interface OracleEdge {
   /**
    * File the from-side symbol is declared in. Required to disambiguate
    * `fromLocalId`s that recur across files (e.g. `_Registered`, `useStyles`) —
-   * see F11 in CODE_GRAPH_EVAL_FAIRNESS_PLAN.md. For IMPORTS this equals
-   * `fromLocalId` (both are the importing file's path).
+   * see F11. For IMPORTS this equals `fromLocalId` (both are the importing
+   * file's path).
    */
   fromPath: string;
   /** Which resolution tier confirmed the target (F10) — for reporting oracle-certain vs best-effort ground truth. */
@@ -277,12 +277,12 @@ export function normalizeGraphifyEdgeType(relation: string): EdgeType {
 /**
  * Potpie `node_type` (+ `class_name`/`name`) → SymbolType.
  *
- * Per POTPIE_EVAL_PLAN.md §4: the payload's `class_name` field (present only on
- * FUNCTION nodes that belong to a class) makes Method/Function/Constructor
- * separation exact, unlike Graphify's structural guessing. No `Unknown` bucket
- * is needed — every Potpie node is classifiable; what's missing (Property,
- * GlobalVariable, Enum, Alias, Namespace, Module — §3 fact 5) is simply absent
- * from the payload, and shows up as recall, not as a kind to normalize away.
+ * The payload's `class_name` field (present only on FUNCTION nodes that belong
+ * to a class) makes Method/Function/Constructor separation exact, unlike
+ * Graphify's structural guessing. No `Unknown` bucket is needed — every Potpie
+ * node is classifiable; what's missing (Property, GlobalVariable, Enum, Alias,
+ * Namespace, Module) is simply absent from the payload, and shows up as recall,
+ * not as a kind to normalize away.
  */
 export function normalizePotpieKind(
   nodeType: string,
@@ -311,11 +311,11 @@ export function normalizePotpieKind(
  *
  * `CONTAINS` is emitted for diagnostics (parentId derivation) but sits outside
  * the head-to-head (not in COMPARABLE_EDGE_TYPES/EXT***REMOVED***ED_EDGE_TYPES).
- * `REFERENCES` → `USES_TYPE`, scored in the extended-edge table — per
- * POTPIE_EVAL_PLAN.md §4, this is a measurement of what the relation is built
- * from (type annotations + `new` expressions), not a charitable mapping to
- * CALLS. Potpie emits no CALLS/IMPORTS/EXT***REMOVED***S/IMPLEMENTS for TS by
- * construction (§3 fact 1-3) — there is no raw relation to map to them.
+ * `REFERENCES` → `USES_TYPE`, scored in the extended-edge table — this is a
+ * measurement of what the relation is built from (type annotations + `new`
+ * expressions), not a charitable mapping to CALLS. Potpie emits no
+ * CALLS/IMPORTS/EXT***REMOVED***S/IMPLEMENTS for TS by construction — there is
+ * no raw relation to map to them.
  */
 export function normalizePotpieEdgeType(relationshipType: string): EdgeType {
   const map: Record<string, EdgeType> = {

@@ -1,7 +1,7 @@
 /**
  * GitNexus adapter — queries the local LadybugDB graph via `gitnexus cypher`.
  *
- * Per CODE_GRAPH_EVAL_PLAN.md §6.2: GitNexus has a clean CLI path. The `cypher`
+ * GitNexus has a clean CLI path. The `cypher`
  * subcommand is the export escape hatch. The only output format is markdown
  * tables (no --json flag), and the CLI truncates output at 64KB, so we page
  * through large results with SKIP/LIMIT.

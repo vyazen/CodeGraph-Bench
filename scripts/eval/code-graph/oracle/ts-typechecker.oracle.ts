@@ -320,10 +320,9 @@ function assertFilesOwnedOnce(ownedFiles: readonly string[], seenFiles: Set<stri
 }
 
 /**
- * Mirrors `loadCompilerOptions`
- * exactly, including all three fallback paths (VSCODE_CODE_GRAPH_EVAL_PLAN.md
- * §1.2): no tsconfig, tsconfig read/parse error, and tsconfig OK but with an
- * empty `fileNames` list. A project with no tsconfig is still analyzed — never
+ * Mirrors `loadCompilerOptions` exactly, including all three fallback paths:
+ * no tsconfig, tsconfig read/parse error, and tsconfig OK but with an empty
+ * `fileNames` list. A project with no tsconfig is still analyzed — never
  * skipped — using its own owned files as the root file list.
  */
 function loadCompilerOptionsForProject(
@@ -1118,8 +1117,8 @@ export class TsTypeCheckerOracle {
  * lacking a `targetLocalId` is either pointing outside the repo (external
  * package, builtin) or is genuinely unresolvable even to the type checker —
  * either way, no tool built from this repo's source can ever win it, so it
- * must not sit in a recall denominator (see F9 in
- * CODE_GRAPH_EVAL_FAIRNESS_PLAN.md). Left as a post-processing pass (not
+ * must not sit in a recall denominator (see F9). Left as a post-processing
+ * pass (not
  * baked into every `pushEdge` call site) so it applies uniformly to both a
  * fresh analysis and a cached JSONL from before this field existed, without
  * requiring the expensive type-check to re-run. Doesn't touch edges that
